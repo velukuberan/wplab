@@ -1,4 +1,4 @@
-# vklab
+# wplab
 
 Self-hosted lab for spinning up disposable web app sandboxes with Traefik + Docker.
 
