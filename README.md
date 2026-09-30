@@ -12,7 +12,16 @@ Each site is created as a self-contained project in the directory where it is ge
 
 Create a site from a configuration file:
 
-    generatesite site.json
+    newsite site.json
+
+For example:
+
+    {
+        "name": "example",
+        "wordpress": "latest",
+        "php": "8.3",
+        "mariadb": "11"
+    }
 
 If `site.json` defines the site name as `example`, running the command from:
 

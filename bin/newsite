@@ -1,157 +1,191 @@
 #!/usr/bin/env bash
-#
-# newsite — spin up a new site from a template
-# Usage: newsite <template> <name> [flags]
-#
-# Flags (all optional):
-#   --wp <version>        WordPress version (default: latest)
-#   --php <version>       PHP version (default: 8.3)
-#   --mariadb <version>   MariaDB version (default: 11)
-#   --admin-user <name>   WP admin username (default: admin)
-#   --admin-pass <pass>   WP admin password (default: random 16 chars)
-#   --admin-email <email> WP admin email (default: admin@test.vkuberan.in)
-#   --title <string>      WP site title (default: same as site name)
-#
-# Example:
-#   newsite wordpress wp1
-#   newsite wordpress wp2 --wp 6.7 --php 8.3
-#   newsite wordpress oldstack --wp 6.4 --php 8.1
 
 set -euo pipefail
 
 # -----------------------------------------------------------------------------
-# Config
+# Paths
 # -----------------------------------------------------------------------------
-TESTLAB="/opt/testlab"
-TEMPLATES="$TESTLAB/templates"
-SITES="$TESTLAB/sites"
-BASE_DOMAIN="test.vkuberan.in"
-MAIL_URL="https://mail.${BASE_DOMAIN}"
-SITES_LOG="$TESTLAB/sites.log"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WPLAB_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+TEMPLATE_DIR="$WPLAB_ROOT/templates/wordpress"
 
-# Defaults
-WP_VERSION="latest"
-PHP_VERSION="8.3"
-MARIADB_VERSION="11"
-ADMIN_USER="admin"
-ADMIN_PASS=""
-ADMIN_EMAIL="admin@test.vkuberan.in"
-SITE_TITLE=""
+# Sites are always generated relative to the directory from which newsite
+# was invoked. The WP Lab repository location must not determine site location.
+OUTPUT_ROOT="$PWD"
 
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-die() { echo "❌ $*" >&2; exit 1; }
-info() { echo "▶ $*"; }
-ok() { echo "✅ $*"; }
+die() {
+    echo "❌ $*" >&2
+    exit 1
+}
 
-# Random string of N chars (letters + digits, no ambiguous chars)
+info() {
+    echo "▶ $*"
+}
+
+ok() {
+    echo "✅ $*"
+}
+
+# Generate a random string containing letters and digits while avoiding
+# visually ambiguous characters.
 randstr() {
     local len="$1"
     local raw
-    raw="$(LC_ALL=C tr -dc 'A-HJ-NP-Za-km-z2-9' < /dev/urandom 2>/dev/null | head -c "$len" || true)"
+
+    raw="$(
+        LC_ALL=C tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom 2>/dev/null |
+            head -c "$len" || true
+    )"
+
     printf '%s' "$raw"
 }
 
-# Read the WordPress version currently on disk in the site's /var/www/html.
-# Returns "MISSING" if version.php isn't there yet.
-# Used to detect silent core upgrades during wp-cli operations.
-wp_version_on_disk() {
-    docker exec "${SITE}-wp" cat /var/www/html/wp-includes/version.php 2>/dev/null \
-        | grep -oP "wp_version = '\K[^']+" || echo "MISSING"
-}
+# -----------------------------------------------------------------------------
+# Dependencies
+# -----------------------------------------------------------------------------
+command -v jq >/dev/null 2>&1 ||
+    die "jq is required but not installed."
 
 # -----------------------------------------------------------------------------
-# Parse positional arguments
+# Arguments
 # -----------------------------------------------------------------------------
-[[ $# -ge 2 ]] || die "Usage: newsite <template> <name> [flags]
-Example: newsite wordpress wp1 --wp 6.7 --php 8.3"
+[[ $# -eq 1 ]] || die "Usage: newsite <config.json>"
 
-TEMPLATE="$1"
-SITE="$2"
-shift 2
+CONFIG="$1"
 
-# -----------------------------------------------------------------------------
-# Parse flags
-# -----------------------------------------------------------------------------
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --wp)           WP_VERSION="$2"; shift 2 ;;
-        --php)          PHP_VERSION="$2"; shift 2 ;;
-        --mariadb)      MARIADB_VERSION="$2"; shift 2 ;;
-        --admin-user)   ADMIN_USER="$2"; shift 2 ;;
-        --admin-pass)   ADMIN_PASS="$2"; shift 2 ;;
-        --admin-email)  ADMIN_EMAIL="$2"; shift 2 ;;
-        --title)        SITE_TITLE="$2"; shift 2 ;;
-        *)              die "Unknown flag: $1" ;;
-    esac
-done
+[[ -f "$CONFIG" ]] ||
+    die "Config file not found: $CONFIG"
 
-# Apply title default (after parsing, since it depends on SITE)
-[[ -z "$SITE_TITLE" ]] && SITE_TITLE="$SITE"
+[[ -r "$CONFIG" ]] ||
+    die "Config file is not readable: $CONFIG"
 
-# Generate admin password if not given
-[[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(randstr 16)"
+jq empty "$CONFIG" 2>/dev/null ||
+    die "Config file is not valid JSON: $CONFIG"
 
 # -----------------------------------------------------------------------------
-# Validation
+# Configuration
 # -----------------------------------------------------------------------------
-TEMPLATE_DIR="$TEMPLATES/$TEMPLATE"
-[[ -d "$TEMPLATE_DIR" ]] || die "Template '$TEMPLATE' not found in $TEMPLATES"
+SITE="$(jq -r '.name // empty' "$CONFIG")"
+WP_VERSION="$(jq -r '.wordpress // "latest"' "$CONFIG")"
+PHP_VERSION="$(jq -r '.php // "8.3"' "$CONFIG")"
+MARIADB_VERSION="$(jq -r '.mariadb // "11"' "$CONFIG")"
 
-# wp-mail-smtp is copied in from a local vendor cache instead of being
-# downloaded from wordpress.org at site-creation time (see the "Install and
-# configure WP Mail SMTP plugin" step below) — avoids a network dependency
-# on every single newsite run. Fail fast, before any containers are created,
-# if the cache hasn't been seeded yet.
-VENDOR_WP_MAIL_SMTP="$TESTLAB/vendor/wp-mail-smtp"
-[[ -d "$VENDOR_WP_MAIL_SMTP" ]] || die "wp-mail-smtp not found at $VENDOR_WP_MAIL_SMTP.
-Seed it with:
-  mkdir -p $TESTLAB/vendor && cd $TESTLAB/vendor
-  curl -LO https://downloads.wordpress.org/plugin/wp-mail-smtp.latest-stable.zip
-  unzip wp-mail-smtp.latest-stable.zip && rm wp-mail-smtp.latest-stable.zip"
+[[ -n "$SITE" ]] ||
+    die "Config must define a site name."
 
-[[ "$SITE" =~ ^[a-z0-9]+$ ]] || die "Site name must be lowercase letters and numbers only (got: $SITE)"
+# Site names become both directory names and part of the local hostname.
+#
+# Valid:
+#   example
+#   captcha
+#   woo-100
+#   wp-67-php81
+#
+# Invalid:
+#   -example
+#   example-
+#   example--test
+#   Example
+#   example_test
+[[ "$SITE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] ||
+    die "Invalid site name '$SITE'. Use lowercase letters, numbers, and single hyphens."
 
-SITE_DIR="$SITES/$SITE"
-[[ ! -d "$SITE_DIR" ]] || die "Site '$SITE' already exists at $SITE_DIR"
+SITE_DIR="$OUTPUT_ROOT/$SITE"
 
 # -----------------------------------------------------------------------------
-# Rollback on error — clean up half-created site
+# Pre-generation validation
 # -----------------------------------------------------------------------------
-CLEANUP_ENABLED=true
+[[ -d "$TEMPLATE_DIR" ]] ||
+    die "WordPress template not found: $TEMPLATE_DIR"
+
+[[ -f "$TEMPLATE_DIR/docker-compose.yml.tmpl" ]] ||
+    die "Docker Compose template not found: $TEMPLATE_DIR/docker-compose.yml.tmpl"
+
+[[ -f "$TEMPLATE_DIR/.env.tmpl" ]] ||
+    die "Environment template not found: $TEMPLATE_DIR/.env.tmpl"
+
+[[ ! -e "$SITE_DIR" ]] ||
+    die "Site directory already exists: $SITE_DIR"
+
+# -----------------------------------------------------------------------------
+# Rollback
+# -----------------------------------------------------------------------------
+# Once generation starts, any failure should remove the partially generated
+# directory. A failed newsite operation must not leave an incomplete project.
+CLEANUP_ENABLED=false
+
 cleanup_on_error() {
     local exit_code=$?
-    if $CLEANUP_ENABLED && [[ $exit_code -ne 0 ]] && [[ -d "$SITE_DIR" ]]; then
+
+    if $CLEANUP_ENABLED &&
+        [[ $exit_code -ne 0 ]] &&
+        [[ -d "$SITE_DIR" ]]; then
+
         echo ""
-        echo "⚠  newsite failed. Cleaning up partial state..."
-        cd "$SITE_DIR" 2>/dev/null && docker compose down -v --remove-orphans 2>/dev/null || true
-        cd /
+        echo "⚠ Site generation failed. Removing partial site directory..."
         rm -rf "$SITE_DIR"
-        echo "   Removed partial site directory: $SITE_DIR"
     fi
 }
+
 trap cleanup_on_error EXIT
 
 # -----------------------------------------------------------------------------
-# Create site folder from template
+# WordPress image
 # -----------------------------------------------------------------------------
-info "Creating site '$SITE' from template '$TEMPLATE'..."
-mkdir -p "$SITE_DIR"
-cp "$TEMPLATE_DIR/docker-compose.yml.tmpl" "$SITE_DIR/docker-compose.yml"
-cp "$TEMPLATE_DIR/.env.tmpl" "$SITE_DIR/.env"
+# Docker Hub WordPress image tags use different forms for "latest" and
+# explicitly requested WordPress versions:
+#
+#   latest + PHP 8.3 -> wordpress:php8.3-apache
+#   6.7    + PHP 8.1 -> wordpress:6.7-php8.1-apache
+if [[ "$WP_VERSION" == "latest" ]]; then
+    WP_IMAGE_TAG="php${PHP_VERSION}-apache"
+else
+    WP_IMAGE_TAG="${WP_VERSION}-php${PHP_VERSION}-apache"
+fi
 
 # -----------------------------------------------------------------------------
-# Generate DB passwords
+# Credentials
 # -----------------------------------------------------------------------------
 DB_PASSWORD="$(randstr 24)"
 DB_ROOT_PASSWORD="$(randstr 24)"
 
-# -----------------------------------------------------------------------------
-# Substitute placeholders
-# -----------------------------------------------------------------------------
-sed -i "s|__SITE__|$SITE|g" "$SITE_DIR/docker-compose.yml"
+ADMIN_USER="admin"
+ADMIN_PASS="$(randstr 16)"
+ADMIN_EMAIL="admin@${SITE}.wplab.test"
 
+SITE_TITLE="$SITE"
+
+# -----------------------------------------------------------------------------
+# Generate site
+# -----------------------------------------------------------------------------
+info "Creating site '$SITE' at $SITE_DIR..."
+
+# From this point onward, a failure must remove SITE_DIR.
+CLEANUP_ENABLED=true
+
+mkdir "$SITE_DIR"
+
+cp \
+    "$TEMPLATE_DIR/docker-compose.yml.tmpl" \
+    "$SITE_DIR/docker-compose.yml"
+
+cp \
+    "$TEMPLATE_DIR/.env.tmpl" \
+    "$SITE_DIR/.env"
+
+# -----------------------------------------------------------------------------
+# Render Docker Compose template
+# -----------------------------------------------------------------------------
+sed -i \
+    -e "s|__SITE__|$SITE|g" \
+    "$SITE_DIR/docker-compose.yml"
+
+# -----------------------------------------------------------------------------
+# Render environment template
+# -----------------------------------------------------------------------------
 sed -i \
     -e "s|__SITE__|$SITE|g" \
     -e "s|__WP_VERSION__|$WP_VERSION|g" \
@@ -165,198 +199,39 @@ sed -i \
     -e "s|__SITE_TITLE__|$SITE_TITLE|g" \
     "$SITE_DIR/.env"
 
-# -----------------------------------------------------------------------------
-# Compute the correct WordPress image tag
-# Docker Hub's wordpress tag scheme:
-#   latest → wordpress:php<PHP>-apache  (no "latest" prefix allowed)
-#   6.7    → wordpress:6.7-php<PHP>-apache
-# -----------------------------------------------------------------------------
-if [[ "$WP_VERSION" == "latest" ]]; then
-    WP_IMAGE_TAG="php${PHP_VERSION}-apache"
-else
-    WP_IMAGE_TAG="${WP_VERSION}-php${PHP_VERSION}-apache"
-fi
+# WP_IMAGE_TAG is calculated rather than directly represented by a template
+# placeholder because it depends on both WordPress and PHP versions.
+echo "WP_IMAGE_TAG=$WP_IMAGE_TAG" >>"$SITE_DIR/.env"
 
-echo "WP_IMAGE_TAG=$WP_IMAGE_TAG" >> "$SITE_DIR/.env"
+# The environment file contains generated credentials.
 chmod 600 "$SITE_DIR/.env"
 
 # -----------------------------------------------------------------------------
-# Bring up the containers
+# Verify generated project
 # -----------------------------------------------------------------------------
-info "Pulling images and starting containers (may take a minute on first run)..."
-cd "$SITE_DIR"
-docker compose up -d
+# No template placeholders should remain in generated files.
+if grep -RqsE '__[A-Z_]+__' \
+    "$SITE_DIR/docker-compose.yml" \
+    "$SITE_DIR/.env"; then
 
-# -----------------------------------------------------------------------------
-# Wait for WordPress to respond
-#
-# Why --resolve? Docker's NAT does not permit a container to reach the host's
-# own public IP via loopback (hairpin NAT). curl from the droplet to the site's
-# public URL would hang. --resolve routes curl straight to Traefik on 127.0.0.1
-# instead. Without this, the wait loop hangs on every restore regardless of
-# DNS or cert state. Do not remove.
-# -----------------------------------------------------------------------------
-URL="https://${SITE}.${BASE_DOMAIN}"
-info "Waiting for $URL to respond..."
-
-WAIT_INTERVAL=2
-WAIT_MAX_ATTEMPTS=60
-WAIT_TIMEOUT=$((WAIT_INTERVAL * WAIT_MAX_ATTEMPTS))
-
-WP_READY=false
-for _ in $(seq 1 "$WAIT_MAX_ATTEMPTS"); do
-    if curl -sfk -o /dev/null -w '%{http_code}' \
-        --resolve "${SITE}.${BASE_DOMAIN}:443:127.0.0.1" \
-        "$URL" | grep -qE '^(200|301|302)$'; then
-        WP_READY=true
-        break
-    fi
-    sleep "$WAIT_INTERVAL"
-done
-
-if ! $WP_READY; then
-    die "Containers are up but $URL didn't respond within ${WAIT_TIMEOUT}s. Check logs with: docker logs ${SITE}-wp"
+    die "Generated site contains unresolved template placeholders."
 fi
 
-# -----------------------------------------------------------------------------
-# WP-CLI helper — runs wp-cli container against this site
-# Uses UID 33 (www-data) so it has write access to /var/www/html
-# HOME=/tmp so WP-CLI has a writable cache directory
-# -----------------------------------------------------------------------------
-wpcli() {
-    docker run --rm \
-        --network "${SITE}_internal" \
-        --volumes-from "${SITE}-wp" \
-        --user "33:33" \
-        -e HOME=/tmp \
-        -e WORDPRESS_DB_HOST=db:3306 \
-        -e WORDPRESS_DB_NAME=wordpress \
-        -e WORDPRESS_DB_USER=wordpress \
-        -e WORDPRESS_DB_PASSWORD="$DB_PASSWORD" \
-        "wordpress:cli-php${PHP_VERSION}" \
-        "$@"
-}
-
-# -----------------------------------------------------------------------------
-# DIAGNOSTIC: verify WP core files present before running wp-cli.
-# Also snapshot the version so we can detect any silent upgrade later.
-# -----------------------------------------------------------------------------
-V_INITIAL="$(wp_version_on_disk)"
-info "WP core on disk after entrypoint:  $V_INITIAL"
-[[ "$V_INITIAL" == "MISSING" ]] && die "WP core files missing from volume — entrypoint race condition"
-
-# -----------------------------------------------------------------------------
-# Install WordPress non-interactively
-# -----------------------------------------------------------------------------
-info "Installing WordPress via WP-CLI..."
-wpcli wp core install \
-    --url="$URL" \
-    --title="$SITE_TITLE" \
-    --admin_user="$ADMIN_USER" \
-    --admin_password="$ADMIN_PASS" \
-    --admin_email="$ADMIN_EMAIL" \
-    --skip-email > /dev/null
-
-V_AFTER_INSTALL="$(wp_version_on_disk)"
-info "WP core after 'wp core install':   $V_AFTER_INSTALL"
-
-# -----------------------------------------------------------------------------
-# Install and configure WP Mail SMTP plugin → mailpit
-# Copied in from the local vendor cache (docker cp, same mechanism siteshell
-# uses for --upload-plugin) instead of `wp plugin install wp-mail-smtp`,
-# which downloads from wordpress.org and made every newsite run depend on
-# that network call succeeding. WP-CLI writes plugin config to DB. Actual
-# mail sending happens later from the WP container, which is on the `web`
-# network alongside mailpit.
-# -----------------------------------------------------------------------------
-info "Installing WP Mail SMTP plugin (from local vendor cache) and pointing it at mailpit..."
-docker cp "$VENDOR_WP_MAIL_SMTP" "${SITE}-wp:/var/www/html/wp-content/plugins/"
-docker exec "${SITE}-wp" chown -R 33:33 /var/www/html/wp-content/plugins/wp-mail-smtp
-wpcli wp plugin activate wp-mail-smtp --quiet
-
-V_AFTER_PLUGIN="$(wp_version_on_disk)"
-info "WP core after plugin install:      $V_AFTER_PLUGIN"
-
-SMTP_CONFIG=$(cat <<JSON
-{
-    "mail": {
-        "from_email": "${SITE}@test.vkuberan.in",
-        "from_name": "${SITE_TITLE} (testlab)",
-        "mailer": "smtp",
-        "return_path": false,
-        "from_email_force": true,
-        "from_name_force": true
-    },
-    "smtp": {
-        "host": "mailpit",
-        "port": 1025,
-        "encryption": "none",
-        "autotls": false,
-        "auth": false,
-        "user": "",
-        "pass": ""
-    }
-}
-JSON
-)
-
-wpcli wp option update wp_mail_smtp "$SMTP_CONFIG" --format=json > /dev/null
-
-V_FINAL="$(wp_version_on_disk)"
-info "WP core after option update:       $V_FINAL"
-
-# -----------------------------------------------------------------------------
-# Fail loudly if any wpcli step silently upgraded WP core.
-# This turns a silent bug into a visible one — better to fail newsite than
-# let a "6.5" site quietly become 7.0.4.
-# -----------------------------------------------------------------------------
-if [[ "$V_INITIAL" != "$V_FINAL" ]]; then
-    die "WP core was silently upgraded from $V_INITIAL to $V_FINAL during wp-cli operations.
-    Check the four 'WP core' lines above to see which step caused it."
-fi
-
-# -----------------------------------------------------------------------------
-# Save credentials file (for siteinfo)
-# -----------------------------------------------------------------------------
-cat > "$SITE_DIR/.credentials" << CREDS
-SITE_NAME=$SITE
-SITE_URL=$URL
-ADMIN_URL=$URL/wp-admin/
-ADMIN_USER=$ADMIN_USER
-ADMIN_PASS=$ADMIN_PASS
-ADMIN_EMAIL=$ADMIN_EMAIL
-CREATED_AT=$(date '+%Y-%m-%d %H:%M:%S')
-CREDS
-chmod 600 "$SITE_DIR/.credentials"
-
-# -----------------------------------------------------------------------------
-# Append to sites log
-# -----------------------------------------------------------------------------
-echo "$(date '+%Y-%m-%d %H:%M:%S')  CREATE  $SITE  $TEMPLATE  wp=$WP_VERSION php=$PHP_VERSION mariadb=$MARIADB_VERSION" >> "$SITES_LOG"
-
-# All done — disable rollback trap
+# Generation is now complete. From this point onward the generated project
+# belongs to the user and must not be removed by the rollback trap.
 CLEANUP_ENABLED=false
 
 # -----------------------------------------------------------------------------
-# Success summary
+# Success
 # -----------------------------------------------------------------------------
 echo ""
-ok "$SITE is live at $URL"
+ok "Site project generated."
 echo ""
-echo "   Stack:       WordPress $WP_VERSION · PHP $PHP_VERSION · MariaDB $MARIADB_VERSION"
-echo ""
-echo "   🔐 Admin login"
-echo "      URL:      $URL/wp-admin/"
-echo "      Username: $ADMIN_USER"
-echo "      Password: $ADMIN_PASS"
-echo ""
-echo "   📬 Test emails"
-echo "      All mail from this site lands in mailpit:"
-echo "      $MAIL_URL"
-echo ""
-echo "   📂 Location"
-echo "      Site dir:   $SITE_DIR"
-echo "      Containers: ${SITE}-wp, ${SITE}-db"
-echo ""
-echo "   💡 Retrieve credentials later: siteinfo $SITE"
+echo "  Name:       $SITE"
+echo "  WordPress:  $WP_VERSION"
+echo "  PHP:        $PHP_VERSION"
+echo "  MariaDB:    $MARIADB_VERSION"
+echo "  Image:      wordpress:$WP_IMAGE_TAG"
+echo "  URL:        https://${SITE}.wplab.test"
+echo "  Output:     $SITE_DIR"
 echo ""
