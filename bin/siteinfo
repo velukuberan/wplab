@@ -17,7 +17,10 @@ SITES="$TESTLAB/sites"
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-die() { echo "❌ $*" >&2; exit 1; }
+die() {
+    echo "❌ $*" >&2
+    exit 1
+}
 
 # Load KEY=VALUE file into shell variables (prefixed with $2)
 load_env() {
@@ -26,7 +29,7 @@ load_env() {
     while IFS='=' read -r key value; do
         [[ -z "$key" || "$key" =~ ^# ]] && continue
         printf -v "${prefix}${key}" '%s' "$value"
-    done < "$file"
+    done <"$file"
 }
 
 # -----------------------------------------------------------------------------
@@ -34,7 +37,7 @@ load_env() {
 # -----------------------------------------------------------------------------
 if [[ $# -eq 0 ]]; then
     if [[ ! -d "$SITES" || -z "$(ls -A "$SITES" 2>/dev/null)" ]]; then
-        echo "No sites yet. Create one with: newsite wordpress <name>"
+        echo "No sites yet. Create one with: newsite <config.json>"
         exit 0
     fi
 
@@ -52,7 +55,9 @@ if [[ $# -eq 0 ]]; then
             php_ver=$(grep '^PHP_VERSION=' "$env_file" | cut -d= -f2)
             url=$(grep '^SITE_URL=' "$env_file" | cut -d= -f2)
         else
-            wp_ver="?"; php_ver="?"; url="?"
+            wp_ver="?"
+            php_ver="?"
+            url="?"
         fi
 
         # Detect template by finding a matching template folder (best effort — assume wordpress for now)
