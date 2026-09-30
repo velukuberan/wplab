@@ -16,7 +16,7 @@ services:
       # Traefik routing for the web UI (port 8025)
       - "traefik.enable=true"
       - "traefik.docker.network=web"
-      - "traefik.http.routers.mailpit.rule=Host(`mail.test.vkuberan.in`)"
+      - "traefik.http.routers.mailpit.rule=Host(`mail.wplab.test`)"
       - "traefik.http.routers.mailpit.entrypoints=websecure"
       - "traefik.http.routers.mailpit.tls=true"
       - "traefik.http.services.mailpit.loadbalancer.server.port=8025"
