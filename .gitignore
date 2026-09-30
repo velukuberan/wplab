@@ -1,12 +1,8 @@
-# ─── Secrets ─────────────────────────────────
-# DO API token for Traefik DNS-01 challenge
+# ─── Local configuration / secrets ───────────
 traefik/.env
 
-# Let's Encrypt cert private keys
-traefik/letsencrypt/
-
-# Traefik dashboard basic-auth (contains bcrypt hash)
-traefik/dynamic.yml
+# Local TLS certificates
+traefik/certs/
 
 # ─── Runtime state ───────────────────────────
 # Live WordPress sites — user data, not infra code
