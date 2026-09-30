@@ -39,7 +39,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
-      - "traefik.http.routers.__SITE__.rule=Host(`__SITE__.test.vkuberan.in`)"
+      - "traefik.http.routers.__SITE__.rule=Host(`__SITE__.wplab.test`)"
       - "traefik.http.routers.__SITE__.entrypoints=websecure"
       - "traefik.http.routers.__SITE__.tls=true"
       - "traefik.http.services.__SITE__.loadbalancer.server.port=80"
