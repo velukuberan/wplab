@@ -1,7 +1,7 @@
 services:
   socket-proxy:
     image: tecnativa/docker-socket-proxy:0.3
-    container_name: socket-proxy
+    container_name: wplab-socket-proxy
     restart: unless-stopped
     environment:
       CONTAINERS: 1
@@ -16,32 +16,20 @@ services:
 
   traefik:
     image: traefik:v3.7
-    container_name: traefik
+    container_name: wplab-traefik
     restart: unless-stopped
     depends_on:
       - socket-proxy
     ports:
       - "80:80"
       - "443:443"
-    environment:
-      DO_AUTH_TOKEN: ${DO_AUTH_TOKEN}
     volumes:
       - ./traefik.yml:/etc/traefik/traefik.yml:ro
       - ./dynamic.yml:/etc/traefik/dynamic.yml:ro
-      - ./letsencrypt:/letsencrypt
+      - ./certs:/certs:ro
     networks:
       - web
       - socket
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.dashboard.rule=Host(`traefik.test.vkuberan.in`)"
-      - "traefik.http.routers.dashboard.entryPoints=websecure"
-      - "traefik.http.routers.dashboard.service=api@internal"
-      - "traefik.http.routers.dashboard.tls=true"
-      - "traefik.http.routers.dashboard.tls.certresolver=dnsresolver"
-      - "traefik.http.routers.dashboard.tls.domains[0].main=test.vkuberan.in"
-      - "traefik.http.routers.dashboard.tls.domains[0].sans=*.test.vkuberan.in"
-      - "traefik.http.routers.dashboard.middlewares=dashboard-auth@file"
 
 networks:
   web:

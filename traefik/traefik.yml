@@ -10,6 +10,7 @@ entryPoints:
           to: websecure
           scheme: https
           permanent: true
+
   websecure:
     address: ":443"
 
@@ -18,19 +19,10 @@ providers:
     endpoint: "tcp://socket-proxy:2375"
     exposedByDefault: false
     network: web
+
   file:
     filename: /etc/traefik/dynamic.yml
     watch: true
-
-certificatesResolvers:
-  dnsresolver:
-    acme:
-      email: me@vkuberan.in
-      storage: /letsencrypt/acme.json
-      dnsChallenge:
-        provider: digitalocean
-        propagation:
-          delayBeforeChecks: 120s
 
 log:
   level: INFO

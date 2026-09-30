@@ -1,0 +1,4 @@
+tls:
+  certificates:
+    - certFile: /certs/wplab.test.pem
+      keyFile: /certs/wplab.test-key.pem
