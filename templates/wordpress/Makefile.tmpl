@@ -1,0 +1,34 @@
+.PHONY: up build rebuild down restart logs shell wp composer status clean
+
+up:
+	docker compose up -d
+
+build:
+	docker compose build
+
+rebuild:
+	docker compose up -d --build
+
+down:
+	docker compose down
+
+restart:
+	docker compose restart
+
+logs:
+	docker compose logs -f
+
+shell:
+	docker compose exec wordpress bash
+
+wp:
+	docker compose exec wordpress wp --allow-root
+
+composer:
+	docker compose exec wordpress composer
+
+status:
+	docker compose ps
+
+clean:
+	docker compose down -v

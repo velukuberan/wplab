@@ -107,6 +107,15 @@ SITE_DIR="$OUTPUT_ROOT/$SITE"
 [[ -f "$TEMPLATE_DIR/.env.tmpl" ]] ||
     die "Environment template not found: $TEMPLATE_DIR/.env.tmpl"
 
+[[ -f "$TEMPLATE_DIR/Dockerfile.tmpl" ]] ||
+    die "Dockerfile template not found: $TEMPLATE_DIR/Dockerfile.tmpl"
+
+[[ -f "$TEMPLATE_DIR/nginx/default.conf.tmpl" ]] ||
+    die "Nginx config template not found: $TEMPLATE_DIR/nginx/default.conf.tmpl"
+
+[[ -f "$TEMPLATE_DIR/Makefile.tmpl" ]] ||
+    die "Makefile template not found: $TEMPLATE_DIR/Makefile.tmpl"
+
 [[ ! -e "$SITE_DIR" ]] ||
     die "Site directory already exists: $SITE_DIR"
 
@@ -138,12 +147,12 @@ trap cleanup_on_error EXIT
 # Docker Hub WordPress image tags use different forms for "latest" and
 # explicitly requested WordPress versions:
 #
-#   latest + PHP 8.3 -> wordpress:php8.3-apache
-#   6.7    + PHP 8.1 -> wordpress:6.7-php8.1-apache
+#   latest + PHP 8.3 -> wordpress:php8.3-fpm
+#   6.7    + PHP 8.1 -> wordpress:6.7-php8.1-fpm
 if [[ "$WP_VERSION" == "latest" ]]; then
-    WP_IMAGE_TAG="php${PHP_VERSION}-apache"
+    WP_IMAGE_TAG="php${PHP_VERSION}-fpm"
 else
-    WP_IMAGE_TAG="${WP_VERSION}-php${PHP_VERSION}-apache"
+    WP_IMAGE_TAG="${WP_VERSION}-php${PHP_VERSION}-fpm"
 fi
 
 # -----------------------------------------------------------------------------
@@ -167,6 +176,11 @@ info "Creating site '$SITE' at $SITE_DIR..."
 CLEANUP_ENABLED=true
 
 mkdir "$SITE_DIR"
+mkdir -p "$SITE_DIR/nginx"
+mkdir -p \
+    "$SITE_DIR/plugins" \
+    "$SITE_DIR/mu-plugins" \
+    "$SITE_DIR/themes"
 
 cp \
     "$TEMPLATE_DIR/docker-compose.yml.tmpl" \
@@ -175,6 +189,18 @@ cp \
 cp \
     "$TEMPLATE_DIR/.env.tmpl" \
     "$SITE_DIR/.env"
+
+cp \
+    "$TEMPLATE_DIR/Dockerfile.tmpl" \
+    "$SITE_DIR/Dockerfile"
+
+cp \
+    "$TEMPLATE_DIR/nginx/default.conf.tmpl" \
+    "$SITE_DIR/nginx/default.conf"
+
+cp \
+    "$TEMPLATE_DIR/Makefile.tmpl" \
+    "$SITE_DIR/Makefile"
 
 # -----------------------------------------------------------------------------
 # Render Docker Compose template
@@ -210,10 +236,14 @@ chmod 600 "$SITE_DIR/.env"
 # Verify generated project
 # -----------------------------------------------------------------------------
 # No template placeholders should remain in generated files.
-if grep -RqsE '__[A-Z_]+__' \
-    "$SITE_DIR/docker-compose.yml" \
-    "$SITE_DIR/.env"; then
-
+if
+    grep -RqsE '__[A-Z_]+__' \
+        "$SITE_DIR/docker-compose.yml" \
+        "$SITE_DIR/.env" \
+        "$SITE_DIR/Dockerfile" \
+        "$SITE_DIR/nginx/default.conf" \
+        "$SITE_DIR/Makefile"
+then
     die "Generated site contains unresolved template placeholders."
 fi
 

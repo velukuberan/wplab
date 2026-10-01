@@ -1,0 +1,21 @@
+ARG WP_IMAGE=wordpress:latest
+
+FROM ${WP_IMAGE}
+
+COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends less \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -o /usr/local/bin/wp \
+    https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
+    && chmod +x /usr/local/bin/wp
+
+RUN rm -rf \
+        /usr/src/wordpress/wp-content/plugins \
+        /usr/src/wordpress/wp-content/mu-plugins \
+        /usr/src/wordpress/wp-content/themes \
+    && ln -s /workspace/plugins /usr/src/wordpress/wp-content/plugins \
+    && ln -s /workspace/mu-plugins /usr/src/wordpress/wp-content/mu-plugins \
+    && ln -s /workspace/themes /usr/src/wordpress/wp-content/themes
