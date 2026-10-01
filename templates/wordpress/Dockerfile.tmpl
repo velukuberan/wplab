@@ -8,6 +8,17 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends less \
     && rm -rf /var/lib/apt/lists/*
 
+ENV NVM_DIR=/usr/local/nvm
+
+RUN mkdir -p "$NVM_DIR" \
+    && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash \
+    && . "$NVM_DIR/nvm.sh" \
+    && nvm install --lts \
+    && nvm alias default 'lts/*' \
+    && ln -s "$(nvm which default)" /usr/local/bin/node \
+    && ln -s "$(dirname "$(nvm which default)")/npm" /usr/local/bin/npm \
+    && ln -s "$(dirname "$(nvm which default)")/npx" /usr/local/bin/npx
+
 RUN curl -o /usr/local/bin/wp \
     https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
     && chmod +x /usr/local/bin/wp
