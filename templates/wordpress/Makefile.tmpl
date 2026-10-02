@@ -1,5 +1,456 @@
 .PHONY: up build rebuild down restart logs shell wp composer status clean
 
+HOST_UID := $(shell id -u)
+HOST_GID := $(shell id -g)
+
+DEV_EXEC := docker compose exec \
+	--user "$(HOST_UID):$(HOST_GID)" \
+	--env HOME=/tmp/wplab-dev-$(HOST_UID)
+
+THEME_DIRS := $(patsubst %/,%,$(wildcard themes/*/))
+THEMES := $(notdir $(THEME_DIRS))
+
+PLUGINS := $(notdir $(wildcard plugins/*))
+MU_PLUGINS := $(notdir $(wildcard mu-plugins/*))
+
+SHELL_THEME_TARGETS := $(addprefix shell.theme.,$(THEMES))
+SHELL_PLUGIN_TARGETS := $(addprefix shell.plugin.,$(PLUGINS))
+SHELL_MU_PLUGIN_TARGETS := $(addprefix shell.mu-plugin.,$(MU_PLUGINS))
+
+SHELL_SHORT_TARGETS := $(sort \
+	$(addprefix shell.,$(THEMES)) \
+	$(addprefix shell.,$(PLUGINS)) \
+	$(addprefix shell.,$(MU_PLUGINS)))
+
+$(SHELL_SHORT_TARGETS):
+	@name='$(patsubst shell.%,%,$@)'; \
+	matches=0; \
+	workdir=''; \
+	if [ -d "themes/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/themes/$$name"; \
+	fi; \
+	if [ -d "plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/plugins/$$name"; \
+	elif [ -f "plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/plugins"; \
+	fi; \
+	if [ -d "mu-plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/mu-plugins/$$name"; \
+	elif [ -f "mu-plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/mu-plugins"; \
+	fi; \
+	if [ "$$matches" -eq 0 ]; then \
+		echo "Project not found: $$name"; \
+		exit 1; \
+	fi; \
+	if [ "$$matches" -gt 1 ]; then \
+		echo "Ambiguous project: $$name"; \
+		echo "Use an explicit target:"; \
+		[ -d "themes/$$name" ] && echo "  make shell.theme.$$name" || true; \
+		[ -e "plugins/$$name" ] && echo "  make shell.plugin.$$name" || true; \
+		[ -e "mu-plugins/$$name" ] && echo "  make shell.mu-plugin.$$name" || true; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) \
+		-w "$$workdir" \
+		wordpress env PS1='\w\$$ ' bash --noprofile --norc -i
+
+$(SHELL_THEME_TARGETS):
+	@$(DEV_EXEC) \
+		-w /workspace/themes/$(patsubst shell.theme.%,%,$@) \
+		wordpress env PS1='\w\$$ ' bash --noprofile --norc -i
+
+$(SHELL_PLUGIN_TARGETS):
+	@name='$(patsubst shell.plugin.%,%,$@)'; \
+	if [ -d "plugins/$$name" ]; then \
+		workdir="/workspace/plugins/$$name"; \
+	elif [ -f "plugins/$$name" ]; then \
+		workdir="/workspace/plugins"; \
+	else \
+		echo "Plugin not found: $$name"; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) \
+		-w "$$workdir" \
+		wordpress env PS1='\w\$$ ' bash --noprofile --norc -i
+
+$(SHELL_MU_PLUGIN_TARGETS):
+	@name='$(patsubst shell.mu-plugin.%,%,$@)'; \
+	if [ -d "mu-plugins/$$name" ]; then \
+		workdir="/workspace/mu-plugins/$$name"; \
+	elif [ -f "mu-plugins/$$name" ]; then \
+		workdir="/workspace/mu-plugins"; \
+	else \
+		echo "MU plugin not found: $$name"; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) \
+		-w "$$workdir" \
+		wordpress env PS1='\w\$$ ' bash --noprofile --norc -i
+
+CHECK_THEME_TARGETS := $(addprefix check.theme.,$(THEMES))
+CHECK_PLUGIN_TARGETS := $(addprefix check.plugin.,$(PLUGINS))
+CHECK_MU_PLUGIN_TARGETS := $(addprefix check.mu-plugin.,$(MU_PLUGINS))
+
+CHECK_SHORT_TARGETS := $(sort \
+	$(addprefix check.,$(THEMES)) \
+	$(addprefix check.,$(PLUGINS)) \
+	$(addprefix check.,$(MU_PLUGINS)))
+
+$(CHECK_THEME_TARGETS):
+	@$(DEV_EXEC) \
+		-w /workspace/themes/$(patsubst check.theme.%,%,$@) \
+		wordpress composer check
+
+$(CHECK_PLUGIN_TARGETS):
+	@name='$(patsubst check.plugin.%,%,$@)'; \
+	if [ -d "plugins/$$name" ]; then \
+		workdir="/workspace/plugins/$$name"; \
+	elif [ -f "plugins/$$name" ]; then \
+		workdir="/workspace/plugins"; \
+	else \
+		echo "Plugin not found: $$name"; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) -w "$$workdir" wordpress composer check
+
+$(CHECK_MU_PLUGIN_TARGETS):
+	@name='$(patsubst check.mu-plugin.%,%,$@)'; \
+	if [ -d "mu-plugins/$$name" ]; then \
+		workdir="/workspace/mu-plugins/$$name"; \
+	elif [ -f "mu-plugins/$$name" ]; then \
+		workdir="/workspace/mu-plugins"; \
+	else \
+		echo "MU plugin not found: $$name"; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) -w "$$workdir" wordpress composer check
+
+$(CHECK_SHORT_TARGETS):
+	@name='$(patsubst check.%,%,$@)'; \
+	matches=0; \
+	workdir=''; \
+	if [ -d "themes/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/themes/$$name"; \
+	fi; \
+	if [ -d "plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/plugins/$$name"; \
+	elif [ -f "plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/plugins"; \
+	fi; \
+	if [ -d "mu-plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/mu-plugins/$$name"; \
+	elif [ -f "mu-plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/mu-plugins"; \
+	fi; \
+	if [ "$$matches" -eq 0 ]; then \
+		echo "Project not found: $$name"; \
+		exit 1; \
+	fi; \
+	if [ "$$matches" -gt 1 ]; then \
+		echo "Ambiguous project: $$name"; \
+		echo "Use an explicit target:"; \
+		[ -d "themes/$$name" ] && echo "  make check.theme.$$name" || true; \
+		[ -e "plugins/$$name" ] && echo "  make check.plugin.$$name" || true; \
+		[ -e "mu-plugins/$$name" ] && echo "  make check.mu-plugin.$$name" || true; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) -w "$$workdir" wordpress composer check
+
+TEST_THEME_TARGETS := $(addprefix test.theme.,$(THEMES))
+TEST_PLUGIN_TARGETS := $(addprefix test.plugin.,$(PLUGINS))
+TEST_MU_PLUGIN_TARGETS := $(addprefix test.mu-plugin.,$(MU_PLUGINS))
+
+TEST_SHORT_TARGETS := $(sort \
+	$(addprefix test.,$(THEMES)) \
+	$(addprefix test.,$(PLUGINS)) \
+	$(addprefix test.,$(MU_PLUGINS)))
+
+$(TEST_THEME_TARGETS):
+	@$(DEV_EXEC) \
+		-w /workspace/themes/$(patsubst test.theme.%,%,$@) \
+		wordpress composer test
+
+$(TEST_PLUGIN_TARGETS):
+	@name='$(patsubst test.plugin.%,%,$@)'; \
+	if [ -d "plugins/$$name" ]; then \
+		workdir="/workspace/plugins/$$name"; \
+	elif [ -f "plugins/$$name" ]; then \
+		workdir="/workspace/plugins"; \
+	else \
+		echo "Plugin not found: $$name"; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) -w "$$workdir" wordpress composer test
+
+$(TEST_MU_PLUGIN_TARGETS):
+	@name='$(patsubst test.mu-plugin.%,%,$@)'; \
+	if [ -d "mu-plugins/$$name" ]; then \
+		workdir="/workspace/mu-plugins/$$name"; \
+	elif [ -f "mu-plugins/$$name" ]; then \
+		workdir="/workspace/mu-plugins"; \
+	else \
+		echo "MU plugin not found: $$name"; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) -w "$$workdir" wordpress composer test
+
+$(TEST_SHORT_TARGETS):
+	@name='$(patsubst test.%,%,$@)'; \
+	matches=0; \
+	workdir=''; \
+	if [ -d "themes/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/themes/$$name"; \
+	fi; \
+	if [ -d "plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/plugins/$$name"; \
+	elif [ -f "plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/plugins"; \
+	fi; \
+	if [ -d "mu-plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/mu-plugins/$$name"; \
+	elif [ -f "mu-plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/mu-plugins"; \
+	fi; \
+	if [ "$$matches" -eq 0 ]; then \
+		echo "Project not found: $$name"; \
+		exit 1; \
+	fi; \
+	if [ "$$matches" -gt 1 ]; then \
+		echo "Ambiguous project: $$name"; \
+		echo "Use an explicit target:"; \
+		[ -d "themes/$$name" ] && echo "  make test.theme.$$name" || true; \
+		[ -e "plugins/$$name" ] && echo "  make test.plugin.$$name" || true; \
+		[ -e "mu-plugins/$$name" ] && echo "  make test.mu-plugin.$$name" || true; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) -w "$$workdir" wordpress composer test
+
+NPM_CHECK_THEME_TARGETS := $(addprefix check.npm.theme.,$(THEMES))
+NPM_CHECK_PLUGIN_TARGETS := $(addprefix check.npm.plugin.,$(PLUGINS))
+NPM_CHECK_MU_PLUGIN_TARGETS := $(addprefix check.npm.mu-plugin.,$(MU_PLUGINS))
+
+NPM_CHECK_TARGETS := $(sort \
+	$(addprefix check.npm.,$(THEMES)) \
+	$(addprefix check.npm.,$(PLUGINS)) \
+	$(addprefix check.npm.,$(MU_PLUGINS)))
+
+NPM_TEST_TARGETS := $(sort \
+	$(addprefix test.npm.,$(THEMES)) \
+	$(addprefix test.npm.,$(PLUGINS)) \
+	$(addprefix test.npm.,$(MU_PLUGINS)))
+
+NPM_TEST_THEME_TARGETS := $(addprefix test.npm.theme.,$(THEMES))
+NPM_TEST_PLUGIN_TARGETS := $(addprefix test.npm.plugin.,$(PLUGINS))
+NPM_TEST_MU_PLUGIN_TARGETS := $(addprefix test.npm.mu-plugin.,$(MU_PLUGINS))
+
+$(NPM_CHECK_THEME_TARGETS):
+	@$(DEV_EXEC) \
+		-w /workspace/themes/$(patsubst check.npm.theme.%,%,$@) \
+		wordpress bash -lc '\
+			. /usr/local/nvm/nvm.sh; \
+			if [ -f .nvmrc ]; then \
+				nvm use || exit $$?; \
+			fi; \
+			npm run check'
+
+$(NPM_CHECK_PLUGIN_TARGETS):
+	@name='$(patsubst check.npm.plugin.%,%,$@)'; \
+	if [ -d "plugins/$$name" ]; then \
+		workdir="/workspace/plugins/$$name"; \
+	elif [ -f "plugins/$$name" ]; then \
+		workdir="/workspace/plugins"; \
+	else \
+		echo "Plugin not found: $$name"; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) \
+		-w "$$workdir" \
+		wordpress bash -lc '\
+			. /usr/local/nvm/nvm.sh; \
+			if [ -f .nvmrc ]; then \
+				nvm use || exit $$?; \
+			fi; \
+			npm run check'
+
+$(NPM_CHECK_MU_PLUGIN_TARGETS):
+	@name='$(patsubst check.npm.mu-plugin.%,%,$@)'; \
+	if [ -d "mu-plugins/$$name" ]; then \
+		workdir="/workspace/mu-plugins/$$name"; \
+	elif [ -f "mu-plugins/$$name" ]; then \
+		workdir="/workspace/mu-plugins"; \
+	else \
+		echo "MU plugin not found: $$name"; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) \
+		-w "$$workdir" \
+		wordpress bash -lc '\
+			. /usr/local/nvm/nvm.sh; \
+			if [ -f .nvmrc ]; then \
+				nvm use || exit $$?; \
+			fi; \
+			npm run check'
+
+$(NPM_CHECK_TARGETS):
+	@name='$(patsubst check.npm.%,%,$@)'; \
+	matches=0; \
+	workdir=''; \
+	if [ -d "themes/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/themes/$$name"; \
+	fi; \
+	if [ -d "plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/plugins/$$name"; \
+	elif [ -f "plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/plugins"; \
+	fi; \
+	if [ -d "mu-plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/mu-plugins/$$name"; \
+	elif [ -f "mu-plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/mu-plugins"; \
+	fi; \
+	if [ "$$matches" -eq 0 ]; then \
+		echo "Project not found: $$name"; \
+		exit 1; \
+	fi; \
+	if [ "$$matches" -gt 1 ]; then \
+		echo "Ambiguous project: $$name"; \
+		echo "Use an explicit target:"; \
+		[ -d "themes/$$name" ] && echo "  make check.npm.theme.$$name" || true; \
+		[ -e "plugins/$$name" ] && echo "  make check.npm.plugin.$$name" || true; \
+		[ -e "mu-plugins/$$name" ] && echo "  make check.npm.mu-plugin.$$name" || true; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) \
+		-w "$$workdir" \
+		wordpress bash -lc '\
+			. /usr/local/nvm/nvm.sh; \
+			if [ -f .nvmrc ]; then \
+				nvm use || exit $$?; \
+			fi; \
+			npm run check'
+
+$(NPM_TEST_THEME_TARGETS):
+	@$(DEV_EXEC) \
+		-w /workspace/themes/$(patsubst test.npm.theme.%,%,$@) \
+		wordpress bash -lc '\
+			. /usr/local/nvm/nvm.sh; \
+			if [ -f .nvmrc ]; then \
+				nvm use || exit $$?; \
+			fi; \
+			npm run test'
+
+$(NPM_TEST_PLUGIN_TARGETS):
+	@name='$(patsubst test.npm.plugin.%,%,$@)'; \
+	if [ -d "plugins/$$name" ]; then \
+		workdir="/workspace/plugins/$$name"; \
+	elif [ -f "plugins/$$name" ]; then \
+		workdir="/workspace/plugins"; \
+	else \
+		echo "Plugin not found: $$name"; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) \
+		-w "$$workdir" \
+		wordpress bash -lc '\
+			. /usr/local/nvm/nvm.sh; \
+			if [ -f .nvmrc ]; then \
+				nvm use || exit $$?; \
+			fi; \
+			npm run test'
+
+$(NPM_TEST_MU_PLUGIN_TARGETS):
+	@name='$(patsubst test.npm.mu-plugin.%,%,$@)'; \
+	if [ -d "mu-plugins/$$name" ]; then \
+		workdir="/workspace/mu-plugins/$$name"; \
+	elif [ -f "mu-plugins/$$name" ]; then \
+		workdir="/workspace/mu-plugins"; \
+	else \
+		echo "MU plugin not found: $$name"; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) \
+		-w "$$workdir" \
+		wordpress bash -lc '\
+			. /usr/local/nvm/nvm.sh; \
+			if [ -f .nvmrc ]; then \
+				nvm use || exit $$?; \
+			fi; \
+			npm run test'
+
+$(NPM_TEST_TARGETS):
+	@name='$(patsubst test.npm.%,%,$@)'; \
+	matches=0; \
+	workdir=''; \
+	if [ -d "themes/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/themes/$$name"; \
+	fi; \
+	if [ -d "plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/plugins/$$name"; \
+	elif [ -f "plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/plugins"; \
+	fi; \
+	if [ -d "mu-plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/mu-plugins/$$name"; \
+	elif [ -f "mu-plugins/$$name" ]; then \
+		matches=$$((matches + 1)); \
+		workdir="/workspace/mu-plugins"; \
+	fi; \
+	if [ "$$matches" -eq 0 ]; then \
+		echo "Project not found: $$name"; \
+		exit 1; \
+	fi; \
+	if [ "$$matches" -gt 1 ]; then \
+		echo "Ambiguous project: $$name"; \
+		echo "Use an explicit target:"; \
+		[ -d "themes/$$name" ] && echo "  make test.npm.theme.$$name" || true; \
+		[ -e "plugins/$$name" ] && echo "  make test.npm.plugin.$$name" || true; \
+		[ -e "mu-plugins/$$name" ] && echo "  make test.npm.mu-plugin.$$name" || true; \
+		exit 1; \
+	fi; \
+	$(DEV_EXEC) \
+		-w "$$workdir" \
+		wordpress bash -lc '\
+			. /usr/local/nvm/nvm.sh; \
+			if [ -f .nvmrc ]; then \
+				nvm use || exit $$?; \
+			fi; \
+			npm run test'
+
+node.install.%:
+	@docker compose exec wordpress bash -lc '\
+		. /usr/local/nvm/nvm.sh; \
+		nvm install $(patsubst node.install.%,%,$@)'
+
+node.list:
+	@docker compose exec wordpress bash -lc '\
+		. /usr/local/nvm/nvm.sh; \
+		nvm ls'
+
 up:
 	docker compose up -d
 
@@ -25,7 +476,7 @@ wp:
 	docker compose exec wordpress wp --allow-root
 
 composer:
-	docker compose exec wordpress composer
+	@$(DEV_EXEC) wordpress composer
 
 status:
 	docker compose ps
