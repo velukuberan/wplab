@@ -1,4 +1,4 @@
-.PHONY: up build rebuild down restart logs shell wp composer status clean
+.PHONY: help up build rebuild down restart logs shell wp composer status clean
 
 HOST_UID := $(shell id -u)
 HOST_GID := $(shell id -g)
@@ -483,3 +483,177 @@ status:
 
 clean:
 	docker compose down -v
+
+help:
+	@echo "WP Lab commands"
+	@echo
+	@echo "Environment"
+	@echo "  make up                       Start the site"
+	@echo "  make down                     Stop the site"
+	@echo "  make build                    Build containers"
+	@echo "  make rebuild                  Rebuild and start containers"
+	@echo "  make restart                  Restart containers"
+	@echo "  make logs                     Follow container logs"
+	@echo "  make status                   Show container status"
+	@echo "  make clean                    Remove containers and volumes"
+	@echo
+	@echo "Development shells"
+	@echo "  make shell                    Open the WordPress container shell"
+	@echo "  make shell.NAME               Open a project shell"
+	@echo "  make shell.theme.NAME         Open a theme shell"
+	@echo "  make shell.plugin.NAME        Open a plugin shell"
+	@echo "  make shell.mu-plugin.NAME     Open an MU-plugin shell"
+	@echo
+	@echo "Composer"
+	@echo "  make composer                 Run Composer"
+	@echo "  make check.NAME               Run Composer check"
+	@echo "  make check.theme.NAME         Run Composer check for a theme"
+	@echo "  make check.plugin.NAME        Run Composer check for a plugin"
+	@echo "  make check.mu-plugin.NAME     Run Composer check for an MU plugin"
+	@echo "  make test.NAME                Run Composer test"
+	@echo "  make test.theme.NAME          Run Composer test for a theme"
+	@echo "  make test.plugin.NAME         Run Composer test for a plugin"
+	@echo "  make test.mu-plugin.NAME      Run Composer test for an MU plugin"
+	@echo
+	@echo "npm"
+	@echo "  make check.npm.NAME           Run npm check"
+	@echo "  make check.npm.theme.NAME     Run npm check for a theme"
+	@echo "  make check.npm.plugin.NAME    Run npm check for a plugin"
+	@echo "  make check.npm.mu-plugin.NAME Run npm check for an MU plugin"
+	@echo "  make test.npm.NAME            Run npm test"
+	@echo "  make test.npm.theme.NAME      Run npm test for a theme"
+	@echo "  make test.npm.plugin.NAME     Run npm test for a plugin"
+	@echo "  make test.npm.mu-plugin.NAME  Run npm test for an MU plugin"
+	@echo
+	@echo "Node / NVM"
+	@echo "  make node.list                List installed Node versions"
+	@echo "  make node.install.VERSION     Install a Node version"
+	@echo
+	@echo "WordPress"
+	@echo "  make wp                       Run WP-CLI"
+	@echo
+	@echo "NAME targets are discovered from themes/, plugins/, and mu-plugins/."
+
+help.%:
+	@case "$*" in \
+    		up) \
+			echo "Usage:"; \
+			echo "  make up"; \
+			echo; \
+			echo "Starts the site containers in detached mode."; \
+			;; \
+		down) \
+			echo "Usage:"; \
+			echo "  make down"; \
+			echo; \
+			echo "Stops and removes the site containers."; \
+			;; \
+		build) \
+			echo "Usage:"; \
+			echo "  make build"; \
+			echo; \
+			echo "Builds the site container images."; \
+			;; \
+		rebuild) \
+			echo "Usage:"; \
+			echo "  make rebuild"; \
+			echo; \
+			echo "Rebuilds the images and starts the site."; \
+			;; \
+		restart) \
+			echo "Usage:"; \
+			echo "  make restart"; \
+			echo; \
+			echo "Restarts the running site containers."; \
+			;; \
+		logs) \
+			echo "Usage:"; \
+			echo "  make logs"; \
+			echo; \
+			echo "Follows Docker Compose logs."; \
+			;; \
+		status) \
+			echo "Usage:"; \
+			echo "  make status"; \
+			echo; \
+			echo "Shows the current Docker Compose container status."; \
+			;; \
+		clean) \
+			echo "Usage:"; \
+			echo "  make clean"; \
+			echo; \
+			echo "Stops the site and removes its Docker volumes."; \
+			;; \
+		shell) \
+			echo "Usage:"; \
+			echo "  make shell.NAME"; \
+			echo "  make shell.theme.NAME"; \
+			echo "  make shell.plugin.NAME"; \
+			echo "  make shell.mu-plugin.NAME"; \
+			echo; \
+			echo "Opens an interactive shell in the selected project."; \
+			;; \
+		check) \
+			echo "Usage:"; \
+			echo "  make check.NAME"; \
+			echo "  make check.theme.NAME"; \
+			echo "  make check.plugin.NAME"; \
+			echo "  make check.mu-plugin.NAME"; \
+			echo; \
+			echo "Runs 'composer check' in the selected project."; \
+			;; \
+		test) \
+			echo "Usage:"; \
+			echo "  make test.NAME"; \
+			echo "  make test.theme.NAME"; \
+			echo "  make test.plugin.NAME"; \
+			echo "  make test.mu-plugin.NAME"; \
+			echo; \
+			echo "Runs 'composer test' in the selected project."; \
+			;; \
+		check.npm) \
+			echo "Usage:"; \
+			echo "  make check.npm.NAME"; \
+			echo "  make check.npm.theme.NAME"; \
+			echo "  make check.npm.plugin.NAME"; \
+			echo "  make check.npm.mu-plugin.NAME"; \
+			echo; \
+			echo "Runs 'npm run check' in the selected project."; \
+			echo "If .nvmrc exists, its Node version must already be installed."; \
+			;; \
+		test.npm) \
+			echo "Usage:"; \
+			echo "  make test.npm.NAME"; \
+			echo "  make test.npm.theme.NAME"; \
+			echo "  make test.npm.plugin.NAME"; \
+			echo "  make test.npm.mu-plugin.NAME"; \
+			echo; \
+			echo "Runs 'npm run test' in the selected project."; \
+			echo "If .nvmrc exists, its Node version must already be installed."; \
+			;; \
+		node.install) \
+			echo "Usage:"; \
+			echo "  make node.install.VERSION"; \
+			echo; \
+			echo "Examples:"; \
+			echo "  make node.install.20"; \
+			echo "  make node.install.20.20.2"; \
+			;; \
+		node.list) \
+			echo "Usage:"; \
+			echo "  make node.list"; \
+			echo; \
+			echo "Lists Node versions installed through NVM."; \
+			;; \
+		wp) \
+			echo "Usage:"; \
+			echo "  make wp"; \
+			echo; \
+			echo "Runs WP-CLI inside the WordPress container."; \
+			;; \
+		*) \
+			echo "No help available for: $*"; \
+			echo "Run 'make help' to see available commands."; \
+			exit 1; \
+			;; \
+	esac
