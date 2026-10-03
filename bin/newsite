@@ -43,11 +43,33 @@ randstr() {
     printf '%s' "$raw"
 }
 
+ensure_host_entry() {
+    local hostname="${SITE}.wplab.test"
+    local entry="127.0.0.1 $hostname"
+
+    if getent hosts "$hostname" >/dev/null 2>&1; then
+        return
+    fi
+
+    info "Adding local host entry for $hostname..."
+
+    echo "$entry" | sudo tee -a /etc/hosts >/dev/null
+}
+
 # -----------------------------------------------------------------------------
 # Dependencies
 # -----------------------------------------------------------------------------
 command -v jq >/dev/null 2>&1 ||
     die "jq is required but not installed."
+
+command -v docker >/dev/null 2>&1 ||
+    die "Docker is required but not installed."
+
+docker compose version >/dev/null 2>&1 ||
+    die "Docker Compose is required but not available."
+
+sudo -v ||
+    die "sudo access is required to register the local hostname."
 
 # -----------------------------------------------------------------------------
 # Arguments
@@ -66,15 +88,60 @@ jq empty "$CONFIG" 2>/dev/null ||
     die "Config file is not valid JSON: $CONFIG"
 
 # -----------------------------------------------------------------------------
+# Configuration validation
+# -----------------------------------------------------------------------------
+if jq -e \
+    '.multisite.enabled? != null and (.multisite.enabled | type) != "boolean"' \
+    "$CONFIG" >/dev/null; then
+    die "multisite.enabled must be a boolean."
+fi
+
+# -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
 SITE="$(jq -r '.name // empty' "$CONFIG")"
 WP_VERSION="$(jq -r '.wordpress // "latest"' "$CONFIG")"
-PHP_VERSION="$(jq -r '.php // "8.3"' "$CONFIG")"
+PHP_VERSION="$(jq -r '.php // "8.1"' "$CONFIG")"
 MARIADB_VERSION="$(jq -r '.mariadb // "11"' "$CONFIG")"
+
+ADMIN_USER="$(jq -r '.login.user // "admin"' "$CONFIG")"
+ADMIN_PASS="$(jq -r '.login.pass // empty' "$CONFIG")"
+
+MULTISITE_ENABLED="$(jq -r '.multisite.enabled // false' "$CONFIG")"
+MULTISITE_MODE="$(jq -r '.multisite.mode // "subdirectory"' "$CONFIG")"
 
 [[ -n "$SITE" ]] ||
     die "Config must define a site name."
+
+[[ -n "$ADMIN_USER" ]] ||
+    die "login.user must not be empty."
+
+if jq -e '(.login // {}) | has("pass")' "$CONFIG" >/dev/null 2>&1; then
+    [[ -n "$ADMIN_PASS" ]] ||
+        die "login.pass must not be empty."
+else
+    ADMIN_PASS="$(randstr 16)"
+fi
+
+case "$MULTISITE_ENABLED" in
+true | false) ;;
+*)
+    die "multisite.enabled must be true or false."
+    ;;
+esac
+
+case "$MULTISITE_MODE" in
+subdirectory | subdomain) ;;
+*)
+    die "Invalid multisite mode '$MULTISITE_MODE'. Use 'subdirectory' or 'subdomain'."
+    ;;
+esac
+
+# WordPress Multisite parsing is supported, but provisioning will be added
+# after the single-site installer is complete.
+if [[ "$MULTISITE_ENABLED" == "true" ]]; then
+    die "Multisite provisioning is not implemented yet."
+fi
 
 # Site names become both directory names and part of the local hostname.
 #
@@ -116,26 +183,44 @@ SITE_DIR="$OUTPUT_ROOT/$SITE"
 [[ -f "$TEMPLATE_DIR/Makefile.tmpl" ]] ||
     die "Makefile template not found: $TEMPLATE_DIR/Makefile.tmpl"
 
+[[ -f "$TEMPLATE_DIR/scripts/wp-install.sh" ]] ||
+    die "WordPress install script not found: $TEMPLATE_DIR/scripts/wp-install.sh"
+
+[[ -f "$TEMPLATE_DIR/scripts/link-dev-content.sh" ]] ||
+    die "Development content link script not found: $TEMPLATE_DIR/scripts/link-dev-content.sh"
+
 [[ ! -e "$SITE_DIR" ]] ||
     die "Site directory already exists: $SITE_DIR"
 
 # -----------------------------------------------------------------------------
 # Rollback
 # -----------------------------------------------------------------------------
-# Once generation starts, any failure should remove the partially generated
-# directory. A failed newsite operation must not leave an incomplete project.
+# Once generation starts, any failure should remove both Docker resources
+# created for the site and the partially generated project directory.
 CLEANUP_ENABLED=false
 
 cleanup_on_error() {
     local exit_code=$?
 
-    if $CLEANUP_ENABLED &&
-        [[ $exit_code -ne 0 ]] &&
-        [[ -d "$SITE_DIR" ]]; then
-
+    if $CLEANUP_ENABLED && [[ $exit_code -ne 0 ]]; then
         echo ""
-        echo "⚠ Site generation failed. Removing partial site directory..."
-        rm -rf "$SITE_DIR"
+        echo "⚠ Site creation failed. Cleaning up..."
+
+        if [[ -f "$SITE_DIR/docker-compose.yml" ]]; then
+            (
+                cd "$SITE_DIR"
+                docker compose down -v --remove-orphans >/dev/null 2>&1 || true
+                docker image rm \
+                    "${SITE}-wordpress" \
+                    "${SITE}-wp-link" \
+                    "${SITE}-wp-install" \
+                    >/dev/null 2>&1 || true
+            )
+        fi
+
+        if [[ -d "$SITE_DIR" ]]; then
+            rm -rf "$SITE_DIR"
+        fi
     fi
 }
 
@@ -147,7 +232,7 @@ trap cleanup_on_error EXIT
 # Docker Hub WordPress image tags use different forms for "latest" and
 # explicitly requested WordPress versions:
 #
-#   latest + PHP 8.3 -> wordpress:php8.3-fpm
+#   latest + PHP 8.1 -> wordpress:php8.1-fpm
 #   6.7    + PHP 8.1 -> wordpress:6.7-php8.1-fpm
 if [[ "$WP_VERSION" == "latest" ]]; then
     WP_IMAGE_TAG="php${PHP_VERSION}-fpm"
@@ -161,10 +246,7 @@ fi
 DB_PASSWORD="$(randstr 24)"
 DB_ROOT_PASSWORD="$(randstr 24)"
 
-ADMIN_USER="admin"
-ADMIN_PASS="$(randstr 16)"
 ADMIN_EMAIL="admin@${SITE}.wplab.test"
-
 SITE_TITLE="$SITE"
 
 # -----------------------------------------------------------------------------
@@ -172,12 +254,14 @@ SITE_TITLE="$SITE"
 # -----------------------------------------------------------------------------
 info "Creating site '$SITE' at $SITE_DIR..."
 
-# From this point onward, a failure must remove SITE_DIR.
+# From this point onward, a failure must roll back the site.
 CLEANUP_ENABLED=true
 
 mkdir "$SITE_DIR"
-mkdir -p "$SITE_DIR/nginx"
+
 mkdir -p \
+    "$SITE_DIR/nginx" \
+    "$SITE_DIR/scripts" \
     "$SITE_DIR/plugins" \
     "$SITE_DIR/mu-plugins" \
     "$SITE_DIR/themes"
@@ -202,6 +286,17 @@ cp \
     "$TEMPLATE_DIR/Makefile.tmpl" \
     "$SITE_DIR/Makefile"
 
+cp \
+    "$TEMPLATE_DIR/scripts/wp-install.sh" \
+    "$SITE_DIR/scripts/wp-install.sh"
+
+cp "$TEMPLATE_DIR/scripts/link-dev-content.sh" \
+    "$SITE_DIR/scripts/link-dev-content.sh"
+
+chmod +x \
+    "$SITE_DIR/scripts/wp-install.sh" \
+    "$SITE_DIR/scripts/link-dev-content.sh"
+
 # -----------------------------------------------------------------------------
 # Render Docker Compose template
 # -----------------------------------------------------------------------------
@@ -223,6 +318,8 @@ sed -i \
     -e "s|__ADMIN_PASS__|$ADMIN_PASS|g" \
     -e "s|__ADMIN_EMAIL__|$ADMIN_EMAIL|g" \
     -e "s|__SITE_TITLE__|$SITE_TITLE|g" \
+    -e "s|__MULTISITE_ENABLED__|$MULTISITE_ENABLED|g" \
+    -e "s|__MULTISITE_MODE__|$MULTISITE_MODE|g" \
     "$SITE_DIR/.env"
 
 # WP_IMAGE_TAG is calculated rather than directly represented by a template
@@ -242,20 +339,43 @@ if
         "$SITE_DIR/.env" \
         "$SITE_DIR/Dockerfile" \
         "$SITE_DIR/nginx/default.conf" \
-        "$SITE_DIR/Makefile"
+        "$SITE_DIR/Makefile" \
+        "$SITE_DIR/scripts/wp-install.sh" \
+        "$SITE_DIR/scripts/link-dev-content.sh"
 then
     die "Generated site contains unresolved template placeholders."
 fi
 
-# Generation is now complete. From this point onward the generated project
-# belongs to the user and must not be removed by the rollback trap.
+# -----------------------------------------------------------------------------
+# Start site
+# -----------------------------------------------------------------------------
+info "Starting site..."
+
+(
+    cd "$SITE_DIR"
+    docker compose up -d
+)
+
+# -----------------------------------------------------------------------------
+# Install WordPress
+# -----------------------------------------------------------------------------
+info "Installing WordPress..."
+
+(
+    cd "$SITE_DIR"
+    docker compose --profile install run --rm wp-install
+)
+
+ensure_host_entry
+
+# Site generation and WordPress installation are now complete.
 CLEANUP_ENABLED=false
 
 # -----------------------------------------------------------------------------
 # Success
 # -----------------------------------------------------------------------------
 echo ""
-ok "Site project generated."
+ok "Site created and WordPress installed."
 echo ""
 echo "  Name:       $SITE"
 echo "  WordPress:  $WP_VERSION"
@@ -263,5 +383,7 @@ echo "  PHP:        $PHP_VERSION"
 echo "  MariaDB:    $MARIADB_VERSION"
 echo "  Image:      wordpress:$WP_IMAGE_TAG"
 echo "  URL:        https://${SITE}.wplab.test"
+echo "  Multisite:  $MULTISITE_ENABLED"
+echo "  Mode:       $MULTISITE_MODE"
 echo "  Output:     $SITE_DIR"
 echo ""
