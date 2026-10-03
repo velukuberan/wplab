@@ -30,15 +30,15 @@ services:
       WORDPRESS_CONFIG_EXTRA: |
         define('WP_AUTO_UPDATE_CORE', false);
         define('AUTOMATIC_UPDATER_DISABLED', true);
-        
+
         if (!defined('WP_DEBUG')) {
             define('WP_DEBUG', true);
         }
-        
+
         if (!defined('WP_DEBUG_LOG')) {
             define('WP_DEBUG_LOG', true);
         }
-        
+
         if (!defined('WP_DEBUG_DISPLAY')) {
             define('WP_DEBUG_DISPLAY', false);
         }
@@ -50,12 +50,64 @@ services:
     networks:
       - internal
 
+  wp-link:
+    build:
+      context: .
+      args:
+        WP_IMAGE: wordpress:${WP_IMAGE_TAG}
+    container_name: __SITE__-wp-link
+    depends_on:
+      - wordpress
+    volumes:
+      - wp_files:/var/www/html
+      - ./plugins:/workspace/plugins
+      - ./mu-plugins:/workspace/mu-plugins
+      - ./themes:/workspace/themes
+      - ./scripts:/workspace/scripts:ro
+    networks:
+      - internal
+    command: /workspace/scripts/link-dev-content.sh
+    restart: "no"
+
+  wp-install:
+    profiles:
+      - install
+    build:
+      context: .
+      args:
+        WP_IMAGE: wordpress:${WP_IMAGE_TAG}
+    container_name: __SITE__-wp-install
+    depends_on:
+      - db
+      - wordpress
+    environment:
+      SITE_URL: ${SITE_URL}
+      SITE_TITLE: ${SITE_TITLE}
+      ADMIN_USER: ${ADMIN_USER}
+      ADMIN_PASS: ${ADMIN_PASS}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - wp_files:/var/www/html
+      - ./scripts:/workspace/scripts:ro
+    networks:
+      - internal
+    command: /workspace/scripts/wp-install.sh
+    restart: "no"
+
   nginx:
     image: nginx:alpine
     container_name: __SITE__-nginx
     restart: unless-stopped
     depends_on:
-      - wordpress
+      wordpress:
+        condition: service_started
+      wp-link:
+        condition: service_completed_successfully
     volumes:
       - wp_files:/var/www/html:ro
       - ./plugins:/workspace/plugins:ro
