@@ -1,4 +1,9 @@
-.PHONY: help up build rebuild down restart logs shell wp composer status clean
+ifneq (,$(wildcard .env))
+include .env
+export
+endif
+
+.PHONY: help up build rebuild down restart logs shell wp composer status clean info
 
 HOST_UID := $(shell id -u)
 HOST_GID := $(shell id -g)
@@ -657,3 +662,31 @@ help.%:
 			exit 1; \
 			;; \
 	esac
+
+info:
+	@printf '\033[1;36mWP Lab\033[0m\n'
+	@printf '\033[2m'; \
+	i=0; while [ $$i -lt 60 ]; do printf '─'; i=$$((i + 1)); done; \
+	printf '\033[0m\n'
+
+	@printf '\033[1mSite\033[0m\n'
+	@printf '  %-12s %s\n' 'Name' '$(SITE_NAME)'
+	@printf '  %-12s \033[36m%s\033[0m\n' 'URL' '$(SITE_URL)'
+	@printf '\n'
+
+	@printf '\033[1mStack\033[0m\n'
+	@printf '  %-12s %s\n' 'WordPress' '$(WP_VERSION)'
+	@printf '  %-12s %s\n' 'PHP' '$(PHP_VERSION)'
+	@printf '  %-12s %s\n' 'MariaDB' '$(MARIADB_VERSION)'
+	@printf '\n'
+
+	@printf '\033[1mLogin\033[0m\n'
+	@printf '  %-12s %s\n' 'Username' '$(ADMIN_USER)'
+	@printf '  %-12s \033[33m%s\033[0m\n' 'Password' '$(ADMIN_PASS)'
+	@printf '\n'
+
+	@printf '\033[1mMultisite\033[0m\n'
+	@printf '  %-12s %s\n' 'Enabled' '$(MULTISITE_ENABLED)'
+	@printf '  %-12s %s\n' 'Mode' '$(MULTISITE_MODE)'
+	@printf '\n'
+
