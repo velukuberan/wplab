@@ -31,6 +31,8 @@ ok() {
 : "${WORDPRESS_DB_NAME:?WORDPRESS_DB_NAME is required}"
 : "${WORDPRESS_DB_USER:?WORDPRESS_DB_USER is required}"
 : "${WORDPRESS_DB_PASSWORD:?WORDPRESS_DB_PASSWORD is required}"
+: "${MULTISITE_ENABLED:?MULTISITE_ENABLED is required}"
+: "${MULTISITE_MODE:?MULTISITE_MODE is required}"
 
 # -----------------------------------------------------------------------------
 # Wait for WordPress files
@@ -89,16 +91,40 @@ fi
 # -----------------------------------------------------------------------------
 # Install WordPress
 # -----------------------------------------------------------------------------
-info "Installing WordPress..."
 
-wp core install \
-    --path=/var/www/html \
-    --url="$SITE_URL" \
-    --title="$SITE_TITLE" \
-    --admin_user="$ADMIN_USER" \
-    --admin_password="$ADMIN_PASS" \
-    --admin_email="$ADMIN_EMAIL" \
-    --skip-email \
-    --allow-root
+if [[ "$MULTISITE_ENABLED" == "true" ]]; then
+    info "Installing WordPress Multisite..."
 
-ok "WordPress installed successfully."
+    MULTISITE_ARGS=()
+
+    if [[ "$MULTISITE_MODE" == "subdomain" ]]; then
+        MULTISITE_ARGS+=(--subdomains)
+    fi
+
+    wp core multisite-install \
+        --path=/var/www/html \
+        --url="$SITE_URL" \
+        --title="$SITE_TITLE" \
+        --admin_user="$ADMIN_USER" \
+        --admin_password="$ADMIN_PASS" \
+        --admin_email="$ADMIN_EMAIL" \
+        --skip-email \
+        --allow-root \
+        "${MULTISITE_ARGS[@]}"
+
+    ok "WordPress Multisite installed successfully."
+else
+    info "Installing WordPress..."
+
+    wp core install \
+        --path=/var/www/html \
+        --url="$SITE_URL" \
+        --title="$SITE_TITLE" \
+        --admin_user="$ADMIN_USER" \
+        --admin_password="$ADMIN_PASS" \
+        --admin_email="$ADMIN_EMAIL" \
+        --skip-email \
+        --allow-root
+
+    ok "WordPress installed successfully."
+fi

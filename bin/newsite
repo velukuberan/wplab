@@ -43,19 +43,6 @@ randstr() {
     printf '%s' "$raw"
 }
 
-ensure_host_entry() {
-    local hostname="${SITE}.wplab.test"
-    local entry="127.0.0.1 $hostname"
-
-    if getent hosts "$hostname" >/dev/null 2>&1; then
-        return
-    fi
-
-    info "Adding local host entry for $hostname..."
-
-    echo "$entry" | sudo tee -a /etc/hosts >/dev/null
-}
-
 # -----------------------------------------------------------------------------
 # Dependencies
 # -----------------------------------------------------------------------------
@@ -67,9 +54,6 @@ command -v docker >/dev/null 2>&1 ||
 
 docker compose version >/dev/null 2>&1 ||
     die "Docker Compose is required but not available."
-
-sudo -v ||
-    die "sudo access is required to register the local hostname."
 
 # -----------------------------------------------------------------------------
 # Arguments
@@ -136,12 +120,6 @@ subdirectory | subdomain) ;;
     die "Invalid multisite mode '$MULTISITE_MODE'. Use 'subdirectory' or 'subdomain'."
     ;;
 esac
-
-# WordPress Multisite parsing is supported, but provisioning will be added
-# after the single-site installer is complete.
-if [[ "$MULTISITE_ENABLED" == "true" ]]; then
-    die "Multisite provisioning is not implemented yet."
-fi
 
 # Site names become both directory names and part of the local hostname.
 #
@@ -365,8 +343,6 @@ info "Installing WordPress..."
     cd "$SITE_DIR"
     docker compose --profile install run --rm wp-install
 )
-
-ensure_host_entry
 
 # Site generation and WordPress installation are now complete.
 CLEANUP_ENABLED=false
