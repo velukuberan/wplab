@@ -3,7 +3,7 @@ include .env
 export
 endif
 
-.PHONY: help up build rebuild down restart logs shell wp composer status clean info
+.PHONY: help up build rebuild down restart logs shell wp composer status clean info link
 
 HOST_UID := $(shell id -u)
 HOST_GID := $(shell id -g)
@@ -471,6 +471,9 @@ down:
 restart:
 	docker compose restart
 
+link:
+	docker compose run --rm wp-link
+
 logs:
 	docker compose logs -f
 
@@ -498,6 +501,7 @@ help:
 	@echo "  make build                    Build containers"
 	@echo "  make rebuild                  Rebuild and start containers"
 	@echo "  make restart                  Restart containers"
+	@echo "  make link                     Link new plugins, themes and MU-plugins"
 	@echo "  make logs                     Follow container logs"
 	@echo "  make status                   Show container status"
 	@echo "  make clean                    Remove containers and volumes"
@@ -570,6 +574,12 @@ help.%:
 			echo "  make restart"; \
 			echo; \
 			echo "Restarts the running site containers."; \
+			;; \
+		link) \
+			echo "Usage:"; \
+			echo "  make link"; \
+			echo; \
+			echo "Links newly added plugins, themes and MU-plugins into WordPress."; \
 			;; \
 		logs) \
 			echo "Usage:"; \
