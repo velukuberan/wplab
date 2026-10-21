@@ -1,19 +1,20 @@
 services:
   mailpit:
-    image: axllent/mailpit:latest
+    image: axllent/mailpit:v1.31.5
     container_name: mailpit
     restart: unless-stopped
     environment:
-      # Store caught mail on disk so it survives restarts
-      MP_DATA_FILE: /data/mailpit.db
-      # Retain last 500 messages (auto-cleanup older)
-      MP_MAX_MESSAGES: 500
+      # Use a persistent SQLite database in the existing named volume.
+      MP_DATABASE: /data/mailpit.db
+      # Retain recent development messages, pruning older ones.
+      MP_MAX_MESSAGES: 5000
     volumes:
       - mailpit_data:/data
     networks:
       - web
+      - wplab-mail
     labels:
-      # Traefik routing for the web UI (port 8025)
+      # Keep the existing local Mailpit URL via Traefik (HTTP port 8025).
       - "traefik.enable=true"
       - "traefik.docker.network=web"
       - "traefik.http.routers.mailpit.rule=Host(`mail.wplab.test`)"
@@ -26,4 +27,6 @@ volumes:
 
 networks:
   web:
+    external: true
+  wplab-mail:
     external: true
