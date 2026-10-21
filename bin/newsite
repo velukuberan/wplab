@@ -8,6 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WPLAB_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMPLATE_DIR="$WPLAB_ROOT/templates/wordpress"
+WPLAB_REGISTRY_TOOL="$SCRIPT_DIR/wplab-registry"
 
 # Sites are always generated relative to the directory from which newsite
 # was invoked. The WP Lab repository location must not determine site location.
@@ -169,6 +170,9 @@ SITE_DIR="$OUTPUT_ROOT/$SITE"
 
 [[ ! -e "$SITE_DIR" ]] ||
     die "Site directory already exists: $SITE_DIR"
+
+# Reject duplicate registered names before creating Docker resources.
+"$WPLAB_REGISTRY_TOOL" check "$SITE" || die "Site name is already registered or registry is invalid."
 
 # -----------------------------------------------------------------------------
 # Rollback
@@ -343,6 +347,10 @@ info "Installing WordPress..."
     cd "$SITE_DIR"
     docker compose --profile install run --rm wp-install
 )
+
+# Register only after successful installation. A registration failure still
+# triggers the existing rollback of Docker resources and site directory.
+"$WPLAB_REGISTRY_TOOL" register "$SITE" "$(realpath -- "$SITE_DIR")"
 
 # Site generation and WordPress installation are now complete.
 CLEANUP_ENABLED=false
