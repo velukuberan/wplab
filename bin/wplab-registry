@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Internal registry utility used by WPLab CLI commands.
+set -euo pipefail
+
+usage() { echo 'Usage: wplab-registry check|register <site-name> [absolute-site-path]' >&2; exit 2; }
+[[ $# -ge 2 ]] || usage
+ACTION=$1
+SITE=$2
+[[ "$SITE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || { echo 'Invalid site name' >&2; exit 2; }
+
+REGISTRY_DIR=${WPLAB_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/wplab}
+REGISTRY="$REGISTRY_DIR/sites.json"
+LOCK="$REGISTRY_DIR/.sites.lock"
+
+# Both operations use the same advisory lock, preventing simultaneous writers.
+mkdir -p "$REGISTRY_DIR"
+chmod 700 "$REGISTRY_DIR"
+exec 9>"$LOCK"
+flock -x 9
+
+if [[ -e "$REGISTRY" ]]; then
+    [[ -f "$REGISTRY" && ! -L "$REGISTRY" ]] || { echo 'Registry must be a regular file' >&2; exit 1; }
+    jq -e 'type == "object" and all(.[]; type == "object" and (.path | type == "string"))' "$REGISTRY" >/dev/null || {
+        echo "Invalid registry: $REGISTRY" >&2; exit 1;
+    }
+fi
+
+case "$ACTION" in
+    check)
+        [[ $# -eq 2 ]] || usage
+        if [[ -f "$REGISTRY" ]] && jq -e --arg name "$SITE" 'has($name)' "$REGISTRY" >/dev/null; then
+            echo "Site '$SITE' is already registered" >&2
+            exit 1
+        fi
+        ;;
+    register)
+        [[ $# -eq 3 ]] || usage
+        SITE_DIR=$3
+        [[ "$SITE_DIR" == /* && -d "$SITE_DIR" && -f "$SITE_DIR/.env" ]] || {
+            echo 'Site path must be an existing absolute site directory containing .env' >&2; exit 1;
+        }
+        [[ "$(realpath -- "$SITE_DIR")" == "$SITE_DIR" ]] || {
+            echo 'Site path must be canonical (no symlink components or /../)' >&2; exit 1;
+        }
+        [[ "$(basename -- "$SITE_DIR")" == "$SITE" ]] || {
+            echo 'Site name and directory basename do not match' >&2; exit 1;
+        }
+        [[ "$(sed -n 's/^SITE_NAME=//p' "$SITE_DIR/.env" | head -n 1)" == "$SITE" ]] || {
+            echo 'Site .env identity does not match' >&2; exit 1;
+        }
+        if [[ -f "$REGISTRY" ]] && jq -e --arg name "$SITE" 'has($name)' "$REGISTRY" >/dev/null; then
+            echo "Site '$SITE' is already registered" >&2; exit 1
+        fi
+        temp=$(mktemp "$REGISTRY_DIR/.sites.json.XXXXXXXX")
+        trap 'rm -f -- "$temp"' EXIT
+        chmod 600 "$temp"
+        if [[ -f "$REGISTRY" ]]; then
+            jq --arg name "$SITE" --arg path "$SITE_DIR" '. + {($name): {path: $path}}' "$REGISTRY" >"$temp"
+        else
+            jq -n --arg name "$SITE" --arg path "$SITE_DIR" '{($name): {path: $path}}' >"$temp"
+        fi
+        mv -f -- "$temp" "$REGISTRY"
+        trap - EXIT
+        ;;
+    *) usage ;;
+esac

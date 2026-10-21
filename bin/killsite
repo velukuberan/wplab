@@ -1,79 +1,67 @@
 #!/usr/bin/env bash
-#
-# killsite — destroy a site: stop containers, delete volumes, remove folder
+# killsite — permanently remove a registered WPLab site
 # Usage: killsite <name>
-# Example: killsite wp1
-
 set -euo pipefail
 
-# -----------------------------------------------------------------------------
-# Config
-# -----------------------------------------------------------------------------
-TESTLAB="/opt/testlab"
-SITES="$TESTLAB/sites"
-SITES_LOG="$TESTLAB/sites.log"
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+[[ $# -eq 1 ]] || fail 'Usage: killsite <name>'
+site=$1
+[[ "$site" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail 'Invalid site name'
 
-# -----------------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------------
-die() { echo "❌ $*" >&2; exit 1; }
-info() { echo "▶ $*"; }
-ok() { echo "✅ $*"; }
+config_dir=${WPLAB_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/wplab}
+registry="$config_dir/sites.json"
+[[ -f "$registry" && ! -L "$registry" ]] || fail "Registry missing or unsafe: $registry"
+command -v jq >/dev/null || fail 'jq is required'
+command -v flock >/dev/null || fail 'flock is required'
+command -v make >/dev/null || fail 'make is required'
 
-# -----------------------------------------------------------------------------
-# Argument validation
-# -----------------------------------------------------------------------------
-[[ $# -eq 1 ]] || die "Usage: killsite <name>
-Example: killsite wp1"
+# Keep the registry stable for the entire operation. The registry utility and
+# killsite should use the same lock file.
+mkdir -p "$config_dir"
+exec 9>"$config_dir/.sites.lock"
+flock -x 9
+jq -e 'type == "object" and all(.[]; type == "object" and (.path | type == "string"))' "$registry" >/dev/null || fail 'Invalid registry'
+site_dir=$(jq -r --arg site "$site" '.[$site].path // empty' "$registry")
+[[ -n "$site_dir" ]] || fail "Site not registered: $site"
+[[ "$site_dir" == /* && "$site_dir" != / && "$site_dir" != "$HOME" ]] || fail 'Unsafe registered path'
+[[ ! -L "$site_dir" && -d "$site_dir" ]] || fail "Site directory missing or a symlink: $site_dir"
+[[ "$(basename -- "$site_dir")" == "$site" ]] || fail 'Registry path does not end in site name'
+canonical=$(realpath -e -- "$site_dir") || fail 'Cannot resolve site directory'
+[[ "$canonical" == "$site_dir" ]] || fail 'Registered path is not canonical'
+[[ "$canonical" != / && "$canonical" != "$HOME" ]] || fail 'Unsafe directory'
+[[ -f "$site_dir/.env" && ! -L "$site_dir/.env" ]] || fail 'Missing or unsafe .env'
+[[ -f "$site_dir/docker-compose.yml" && ! -L "$site_dir/docker-compose.yml" ]] || fail 'Missing or unsafe Compose file'
+# Resolve trusted WPLab template relative to this script, including symlink installs.
+script_path=$(realpath -e -- "${BASH_SOURCE[0]}") || fail 'Cannot locate killsite script'
+wplab_root=$(dirname -- "$(dirname -- "$script_path")")
+trusted_makefile="$wplab_root/templates/wordpress/Makefile.tmpl"
+[[ -f "$trusted_makefile" && ! -L "$trusted_makefile" ]] || fail 'Trusted WPLab Makefile missing'
+[[ "$canonical" != "$wplab_root" && "$canonical" != "$config_dir" ]] || fail 'Unsafe WPLab directory'
 
-SITE="$1"
-SITE_DIR="$SITES/$SITE"
 
-[[ -d "$SITE_DIR" ]] || die "Site '$SITE' does not exist at $SITE_DIR"
+# Read only expected values, never source an untrusted .env into a shell.
+env_value() { sed -n "s/^$1=//p" "$site_dir/.env" | head -n 1; }
+[[ "$(env_value SITE_NAME)" == "$site" ]] || fail 'SITE_NAME mismatch'
+[[ "$(env_value COMPOSE_PROJECT_NAME)" == "$site" ]] || fail 'Compose project mismatch'
 
-# -----------------------------------------------------------------------------
-# Show what will be destroyed
-# -----------------------------------------------------------------------------
-echo ""
-echo "⚠  About to PERMANENTLY DESTROY site '$SITE':"
-echo ""
-echo "   Folder:     $SITE_DIR"
-echo ""
-echo "   Containers:"
-docker ps -a --filter "label=com.docker.compose.project=$SITE" \
-    --format "     - {{.Names}} ({{.Status}})" 2>/dev/null || echo "     (none found)"
-echo ""
-echo "   Volumes:"
-docker volume ls --filter "label=com.docker.compose.project=$SITE" \
-    --format "     - {{.Name}}" 2>/dev/null || echo "     (none found)"
-echo ""
-echo "   Networks:"
-docker network ls --filter "label=com.docker.compose.project=$SITE" \
-    --format "     - {{.Name}}" 2>/dev/null || echo "     (none found)"
-echo ""
-echo "   ALL DATA WILL BE LOST — this cannot be undone."
-echo ""
+printf '\nPERMANENT DELETE: %s\nDirectory: %s\n' "$site" "$site_dir"
+printf 'Removes Docker containers, volumes, images, directory, and registry entry.\n'
+printf 'Type %s to confirm: ' "$site"
+IFS= read -r answer || fail 'Cancelled'
+[[ "$answer" == "$site" ]] || fail 'Cancelled'
 
-# -----------------------------------------------------------------------------
-# Confirmation
-# -----------------------------------------------------------------------------
-read -rp "Type the site name '$SITE' to confirm: " CONFIRM
-[[ "$CONFIRM" == "$SITE" ]] || die "Cancelled (you typed: '$CONFIRM')"
+# Do not delete source files when Docker cleanup fails.
+( cd "$site_dir" && make -f "$trusted_makefile" destroy ) || fail 'Docker cleanup failed; directory and registry preserved'
+# Revalidate the directory before deleting it.
+[[ ! -L "$site_dir" && "$(realpath -e -- "$site_dir")" == "$canonical" ]] || fail 'Directory changed; refusing deletion'
+[[ "$(env_value SITE_NAME)" == "$site" ]] || fail 'Site identity changed; refusing deletion'
 
-# -----------------------------------------------------------------------------
-# Destroy
-# -----------------------------------------------------------------------------
-info "Stopping containers and removing volumes..."
-cd "$SITE_DIR"
-docker compose down -v --remove-orphans
-
-info "Removing site folder..."
-cd /
-rm -rf "$SITE_DIR"
-
-# -----------------------------------------------------------------------------
-# Log the destroy event
-# -----------------------------------------------------------------------------
-echo "$(date '+%Y-%m-%d %H:%M:%S')  DESTROY $SITE" >> "$SITES_LOG"
-
-ok "Site '$SITE' destroyed cleanly."
+# Delete filesystem first; if deletion fails, leave the registry for recovery.
+rm -rf -- "$site_dir" || fail 'Directory removal failed; registry preserved'
+tmp=$(mktemp "$config_dir/.sites.json.XXXXXXXX") || fail 'Cannot create registry update'
+trap 'rm -f -- "$tmp"' EXIT
+jq --arg site "$site" 'del(.[$site])' "$registry" >"$tmp" || fail 'Cannot update registry'
+chmod 600 "$tmp"
+mv -f -- "$tmp" "$registry" || fail 'Cannot replace registry'
+trap - EXIT
+printf 'Removed site %s and its registry entry.\n' "$site"
