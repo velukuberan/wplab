@@ -5,7 +5,7 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 # Paths
 # -----------------------------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(realpath -e -- "${BASH_SOURCE[0]}")")" && pwd)"
 WPLAB_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMPLATE_DIR="$WPLAB_ROOT/templates/wordpress"
 WPLAB_REGISTRY_TOOL="$SCRIPT_DIR/wplab-registry"
