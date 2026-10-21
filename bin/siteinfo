@@ -12,7 +12,7 @@ if [[ $# -eq 2 ]]; then
     [[ "$2" == '--password-only' ]] || usage
 fi
 
-REGISTRY="${XDG_CONFIG_HOME:-$HOME/.config}/wplab/sites.json"
+REGISTRY="${WPLAB_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/wplab}/sites.json"
 if [[ ! -e "$REGISTRY" ]]; then
     [[ $# -eq 0 ]] && { echo 'No registered sites. Create one with: newsite <config.json>'; exit 0; }
     fail 'No global registry found'

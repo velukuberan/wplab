@@ -8,7 +8,8 @@ export WPLAB_CONFIG_DIR="$tmp/config"
 mkdir -p "$WPLAB_CONFIG_DIR" "$tmp/sites/castle" "$tmp/mockbin"
 cat >"$tmp/mockbin/make" <<'MOCK'
 #!/usr/bin/env bash
-[[ "$1" == destroy ]] || exit 99
+[[ "$1" == -f && "$3" == destroy ]] || exit 99
+[[ "$2" == */templates/wordpress/Makefile.tmpl ]] || exit 98
 [[ "${FAIL_MAKE:-0}" == 0 ]]
 MOCK
 chmod +x "$tmp/mockbin/make"
@@ -24,4 +25,6 @@ if printf 'castle\n' | env FAIL_MAKE=1 "$killsite" castle >/dev/null 2>&1; then 
 [[ -d "$site" ]] && jq -e 'has("castle")' "$WPLAB_CONFIG_DIR/sites.json" >/dev/null
 printf 'castle\n' | "$killsite" castle >/dev/null
 [[ ! -e "$site" ]] && jq -e 'has("castle") | not' "$WPLAB_CONFIG_DIR/sites.json" >/dev/null
+[[ -f "$WPLAB_CONFIG_DIR/.sites.lock" ]]
+[[ ! -e "$WPLAB_CONFIG_DIR/sites.lock" ]]
 printf 'PASS: killsite tests\n'

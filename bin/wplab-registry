@@ -8,8 +8,7 @@ ACTION=$1
 SITE=$2
 [[ "$SITE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || { echo 'Invalid site name' >&2; exit 2; }
 
-CONFIG_HOME=${XDG_CONFIG_HOME:-"$HOME/.config"}
-REGISTRY_DIR="$CONFIG_HOME/wplab"
+REGISTRY_DIR=${WPLAB_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/wplab}
 REGISTRY="$REGISTRY_DIR/sites.json"
 LOCK="$REGISTRY_DIR/.sites.lock"
 

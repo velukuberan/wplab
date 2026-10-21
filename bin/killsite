@@ -18,7 +18,7 @@ command -v make >/dev/null || fail 'make is required'
 # Keep the registry stable for the entire operation. The registry utility and
 # killsite should use the same lock file.
 mkdir -p "$config_dir"
-exec 9>"$config_dir/sites.lock"
+exec 9>"$config_dir/.sites.lock"
 flock -x 9
 jq -e 'type == "object" and all(.[]; type == "object" and (.path | type == "string"))' "$registry" >/dev/null || fail 'Invalid registry'
 site_dir=$(jq -r --arg site "$site" '.[$site].path // empty' "$registry")
@@ -31,15 +31,18 @@ canonical=$(realpath -e -- "$site_dir") || fail 'Cannot resolve site directory'
 [[ "$canonical" != / && "$canonical" != "$HOME" ]] || fail 'Unsafe directory'
 [[ -f "$site_dir/.env" && ! -L "$site_dir/.env" ]] || fail 'Missing or unsafe .env'
 [[ -f "$site_dir/docker-compose.yml" && ! -L "$site_dir/docker-compose.yml" ]] || fail 'Missing or unsafe Compose file'
-[[ -f "$site_dir/Makefile" && ! -L "$site_dir/Makefile" ]] || fail 'Missing or unsafe Makefile'
+# Resolve trusted WPLab template relative to this script, including symlink installs.
+script_path=$(realpath -e -- "${BASH_SOURCE[0]}") || fail 'Cannot locate killsite script'
+wplab_root=$(dirname -- "$(dirname -- "$script_path")")
+trusted_makefile="$wplab_root/templates/wordpress/Makefile.tmpl"
+[[ -f "$trusted_makefile" && ! -L "$trusted_makefile" ]] || fail 'Trusted WPLab Makefile missing'
+[[ "$canonical" != "$wplab_root" && "$canonical" != "$config_dir" ]] || fail 'Unsafe WPLab directory'
+
 
 # Read only expected values, never source an untrusted .env into a shell.
 env_value() { sed -n "s/^$1=//p" "$site_dir/.env" | head -n 1; }
 [[ "$(env_value SITE_NAME)" == "$site" ]] || fail 'SITE_NAME mismatch'
 [[ "$(env_value COMPOSE_PROJECT_NAME)" == "$site" ]] || fail 'Compose project mismatch'
-# Refuse to delete arbitrary directories with a Makefile named destroy.
-grep -Fq 'docker compose' "$site_dir/Makefile" || fail 'Not a recognized WPLab Makefile'
-grep -Eq '^destroy:' "$site_dir/Makefile" || fail 'Site does not support make destroy'
 
 printf '\nPERMANENT DELETE: %s\nDirectory: %s\n' "$site" "$site_dir"
 printf 'Removes Docker containers, volumes, images, directory, and registry entry.\n'
@@ -48,7 +51,7 @@ IFS= read -r answer || fail 'Cancelled'
 [[ "$answer" == "$site" ]] || fail 'Cancelled'
 
 # Do not delete source files when Docker cleanup fails.
-( cd "$site_dir" && make destroy ) || fail 'Docker cleanup failed; directory and registry preserved'
+( cd "$site_dir" && make -f "$trusted_makefile" destroy ) || fail 'Docker cleanup failed; directory and registry preserved'
 # Revalidate the directory before deleting it.
 [[ ! -L "$site_dir" && "$(realpath -e -- "$site_dir")" == "$canonical" ]] || fail 'Directory changed; refusing deletion'
 [[ "$(env_value SITE_NAME)" == "$site" ]] || fail 'Site identity changed; refusing deletion'
