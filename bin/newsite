@@ -175,6 +175,9 @@ SITE_DIR="$OUTPUT_ROOT/$SITE"
 docker network inspect wplab-mail >/dev/null 2>&1 ||
     die "Shared Mailpit network 'wplab-mail' is missing. Start WPLab infrastructure first."
 
+[[ -f "$TEMPLATE_DIR/scripts/change-admin-password.sh" ]] ||
+    die "Password helper missing: $TEMPLATE_DIR/scripts/change-admin-password.sh"
+
 [[ ! -e "$SITE_DIR" ]] ||
     die "Site directory already exists: $SITE_DIR"
 
@@ -282,12 +285,16 @@ cp \
 cp "$TEMPLATE_DIR/scripts/link-dev-content.sh" \
     "$SITE_DIR/scripts/link-dev-content.sh"
 
+cp "$TEMPLATE_DIR/scripts/change-admin-password.sh" \
+    "$SITE_DIR/scripts/change-admin-password.sh"
+
 cp "$TEMPLATE_DIR/mu-plugins/wplab-mail.php" \
     "$SITE_DIR/mu-plugins/wplab-mail.php"
 
 chmod +x \
     "$SITE_DIR/scripts/wp-install.sh" \
-    "$SITE_DIR/scripts/link-dev-content.sh"
+    "$SITE_DIR/scripts/link-dev-content.sh" \
+    "$SITE_DIR/scripts/change-admin-password.sh"
 
 # -----------------------------------------------------------------------------
 # Render Docker Compose template
