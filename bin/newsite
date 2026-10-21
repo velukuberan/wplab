@@ -168,6 +168,13 @@ SITE_DIR="$OUTPUT_ROOT/$SITE"
 [[ -f "$TEMPLATE_DIR/scripts/link-dev-content.sh" ]] ||
     die "Development content link script not found: $TEMPLATE_DIR/scripts/link-dev-content.sh"
 
+[[ -f "$TEMPLATE_DIR/mu-plugins/wplab-mail.php" ]] ||
+    die "Mailpit MU-plugin template not found: $TEMPLATE_DIR/mu-plugins/wplab-mail.php"
+
+# Mailpit is shared infrastructure; site creation must not create or own its network.
+docker network inspect wplab-mail >/dev/null 2>&1 ||
+    die "Shared Mailpit network 'wplab-mail' is missing. Start WPLab infrastructure first."
+
 [[ ! -e "$SITE_DIR" ]] ||
     die "Site directory already exists: $SITE_DIR"
 
@@ -274,6 +281,9 @@ cp \
 
 cp "$TEMPLATE_DIR/scripts/link-dev-content.sh" \
     "$SITE_DIR/scripts/link-dev-content.sh"
+
+cp "$TEMPLATE_DIR/mu-plugins/wplab-mail.php" \
+    "$SITE_DIR/mu-plugins/wplab-mail.php"
 
 chmod +x \
     "$SITE_DIR/scripts/wp-install.sh" \
