@@ -3,7 +3,7 @@ include .env
 export
 endif
 
-.PHONY: help up build rebuild down restart logs shell wp composer status clean info link
+.PHONY: help up build rebuild down restart logs shell wp composer status clean destroy info link
 
 HOST_UID := $(shell id -u)
 HOST_GID := $(shell id -g)
@@ -492,6 +492,25 @@ status:
 clean:
 	docker compose down -v
 
+destroy:
+	@set -eu; \
+	  case "$(SITE_NAME)" in \
+	    ''|*[!a-z0-9-]*) echo 'ERROR: Invalid SITE_NAME' >&2; exit 1 ;; \
+	  esac; \
+	  if [ "$(SITE_NAME)" != "$(COMPOSE_PROJECT_NAME)" ]; then \
+	    echo 'ERROR: SITE_NAME and COMPOSE_PROJECT_NAME must match' >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "Removing Docker resources for $(SITE_NAME)..."; \
+	  docker compose --profile install down -v --remove-orphans; \
+	  for suffix in wordpress wp-link wp-install; do \
+	    image="$(SITE_NAME)-$$suffix:latest"; \
+	    if docker image inspect "$$image" >/dev/null 2>&1; then \
+	      docker image rm "$$image" || exit 1; \
+	    fi; \
+	  done; \
+	  echo 'Docker resources removed. Site directory and registry preserved.'
+
 help:
 	@echo "WP Lab commands"
 	@echo
@@ -505,6 +524,7 @@ help:
 	@echo "  make logs                     Follow container logs"
 	@echo "  make status                   Show container status"
 	@echo "  make clean                    Remove containers and volumes"
+	@echo "  make destroy                  Remove site containers, volumes and built images"
 	@echo
 	@echo "Development shells"
 	@echo "  make shell                    Open the WordPress container shell"
