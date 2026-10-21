@@ -27,6 +27,7 @@ services:
       WORDPRESS_DB_NAME: wordpress
       WORDPRESS_DB_USER: wordpress
       WORDPRESS_DB_PASSWORD: ${DB_PASSWORD}
+      WPLAB_SITE_NAME: ${SITE_NAME}
       WORDPRESS_CONFIG_EXTRA: |
         define('WP_AUTO_UPDATE_CORE', false);
         define('AUTOMATIC_UPDATER_DISABLED', true);
@@ -49,6 +50,7 @@ services:
       - ./themes:/workspace/themes
     networks:
       - internal
+      - wplab-mail
 
   wp-link:
     build:
@@ -134,4 +136,6 @@ volumes:
 networks:
   internal:
   web:
+    external: true
+  wplab-mail:
     external: true
