@@ -3,7 +3,7 @@ include .env
 export
 endif
 
-.PHONY: help up build rebuild down restart logs shell wp composer status clean destroy info link
+.PHONY: help up build rebuild down restart logs shell wp composer status clean destroy changepass info link
 
 HOST_UID := $(shell id -u)
 HOST_GID := $(shell id -g)
@@ -483,6 +483,9 @@ shell:
 wp:
 	docker compose exec wordpress wp --allow-root
 
+changepass:
+	@bash ./scripts/change-admin-password.sh
+
 composer:
 	@$(DEV_EXEC) wordpress composer
 
@@ -560,6 +563,7 @@ help:
 	@echo
 	@echo "WordPress"
 	@echo "  make wp                       Run WP-CLI"
+	@echo "  make changepass               Update WordPress admin password and .env"
 	@echo
 	@echo "NAME targets are discovered from themes/, plugins/, and mu-plugins/."
 
@@ -679,6 +683,10 @@ help.%:
 			echo "  make node.list"; \
 			echo; \
 			echo "Lists Node versions installed through NVM."; \
+			;; \
+		changepass) \
+			echo "Usage: make changepass"; \
+			echo "Securely prompts for a new password and updates WordPress and .env."; \
 			;; \
 		wp) \
 			echo "Usage:"; \
