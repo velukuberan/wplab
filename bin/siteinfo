@@ -1,150 +1,91 @@
 #!/usr/bin/env bash
-#
-# siteinfo — show info about a site, or list all sites
-# Usage:
-#   siteinfo                     List all sites
-#   siteinfo <name>              Show full info for one site
-#   siteinfo <name> --password-only   Print just the password (for piping)
-
+# List registered WPLab sites or show details for one site.
+# Usage: siteinfo [name [--password-only]]
 set -euo pipefail
 
-# -----------------------------------------------------------------------------
-# Config
-# -----------------------------------------------------------------------------
-TESTLAB="/opt/testlab"
-SITES="$TESTLAB/sites"
+fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+usage() { printf 'Usage: siteinfo [name [--password-only]]\n' >&2; exit 2; }
 
-# -----------------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------------
-die() {
-    echo "❌ $*" >&2
-    exit 1
+command -v jq >/dev/null 2>&1 || fail 'jq is required'
+[[ $# -le 2 ]] || usage
+if [[ $# -eq 2 ]]; then
+    [[ "$2" == '--password-only' ]] || usage
+fi
+
+REGISTRY="${XDG_CONFIG_HOME:-$HOME/.config}/wplab/sites.json"
+if [[ ! -e "$REGISTRY" ]]; then
+    [[ $# -eq 0 ]] && { echo 'No registered sites. Create one with: newsite <config.json>'; exit 0; }
+    fail 'No global registry found'
+fi
+[[ -f "$REGISTRY" && ! -L "$REGISTRY" ]] || fail 'Registry must be a regular file'
+jq -e 'type == "object" and all(to_entries[]; (.key | test("^[a-z0-9]+(-[a-z0-9]+)*$")) and (.value | type == "object") and (.value.path | type == "string" and startswith("/")))' "$REGISTRY" >/dev/null || fail 'Invalid registry JSON or structure'
+
+# Parse plain KEY=VALUE without executing the contents of .env.
+env_value() {
+    local key="$1" file="$2" line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == "$key="* ]]; then
+            printf '%s' "${line#*=}"
+            return 0
+        fi
+    done < "$file"
+    return 1
 }
 
-# Load KEY=VALUE file into shell variables (prefixed with $2)
-load_env() {
-    local file="$1"
-    local prefix="${2:-}"
-    while IFS='=' read -r key value; do
-        [[ -z "$key" || "$key" =~ ^# ]] && continue
-        printf -v "${prefix}${key}" '%s' "$value"
-    done <"$file"
+site_path() { jq -r --arg name "$1" '.[$name].path // empty' "$REGISTRY"; }
+site_state() {
+    local name="$1" path="$2"
+    if [[ ! -d "$path" || ! -f "$path/.env" ]]; then
+        echo Missing
+    elif ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+        echo Unknown
+    elif docker ps --filter "label=com.docker.compose.project=$name" --format '{{.ID}}' | grep -q .; then
+        echo Running
+    else
+        echo Stopped
+    fi
 }
 
-# -----------------------------------------------------------------------------
-# Mode: LIST (no args)
-# -----------------------------------------------------------------------------
 if [[ $# -eq 0 ]]; then
-    if [[ ! -d "$SITES" || -z "$(ls -A "$SITES" 2>/dev/null)" ]]; then
-        echo "No sites yet. Create one with: newsite <config.json>"
+    if [[ "$(jq 'length' "$REGISTRY")" == 0 ]]; then
+        echo 'No registered sites. Create one with: newsite <config.json>'
         exit 0
     fi
-
-    printf "\n%-12s %-12s %-14s %-40s %s\n" "NAME" "TEMPLATE" "STATUS" "URL" "STACK"
-    printf "%-12s %-12s %-14s %-40s %s\n" "----" "--------" "------" "---" "-----"
-
-    for dir in "$SITES"/*/; do
-        [[ -d "$dir" ]] || continue
-        name="$(basename "$dir")"
-
-        # Read env file for stack info
-        env_file="$dir/.env"
-        if [[ -f "$env_file" ]]; then
-            wp_ver=$(grep '^WP_VERSION=' "$env_file" | cut -d= -f2)
-            php_ver=$(grep '^PHP_VERSION=' "$env_file" | cut -d= -f2)
-            url=$(grep '^SITE_URL=' "$env_file" | cut -d= -f2)
-        else
-            wp_ver="?"
-            php_ver="?"
-            url="?"
+    printf '%-20s %-10s %-38s %s\n' NAME STATUS URL PATH
+    while IFS= read -r name; do
+        path=$(site_path "$name")
+        url='-'
+        if [[ -f "$path/.env" ]]; then
+            url=$(env_value SITE_URL "$path/.env") || url='-'
         fi
-
-        # Detect template by finding a matching template folder (best effort — assume wordpress for now)
-        template="wordpress"
-
-        # Status check via docker
-        if docker ps --filter "label=com.docker.compose.project=$name" --format '{{.Names}}' | grep -q .; then
-            status="✅ Running"
-        else
-            status="⚠  Stopped"
-        fi
-
-        printf "%-12s %-12s %-14s %-40s %s\n" "$name" "$template" "$status" "$url" "WP $wp_ver · PHP $php_ver"
-    done
-    echo ""
+        printf '%-20s %-10s %-38s %s\n' "$name" "$(site_state "$name" "$path")" "$url" "$path"
+    done < <(jq -r 'keys[]' "$REGISTRY")
     exit 0
 fi
 
-# -----------------------------------------------------------------------------
-# Mode: SINGLE SITE
-# -----------------------------------------------------------------------------
 SITE="$1"
-PASSWORD_ONLY=false
-
-if [[ "${2:-}" == "--password-only" ]]; then
-    PASSWORD_ONLY=true
-fi
-
-SITE_DIR="$SITES/$SITE"
-[[ -d "$SITE_DIR" ]] || die "Site '$SITE' does not exist"
-
-CREDS_FILE="$SITE_DIR/.credentials"
+[[ "$SITE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail 'Invalid site name'
+SITE_DIR=$(site_path "$SITE")
+[[ -n "$SITE_DIR" ]] || fail "Site '$SITE' is not registered"
+[[ -d "$SITE_DIR" && -f "$SITE_DIR/.env" ]] || fail "Registered site '$SITE' is missing its directory or .env: $SITE_DIR"
 ENV_FILE="$SITE_DIR/.env"
+[[ "$(env_value SITE_NAME "$ENV_FILE")" == "$SITE" ]] || fail 'Registry and .env site names differ'
 
-[[ -f "$CREDS_FILE" ]] || die "No credentials file found at $CREDS_FILE"
-[[ -f "$ENV_FILE" ]] || die "No env file found at $ENV_FILE"
-
-# Load both files with prefixes to avoid var name collisions
-load_env "$CREDS_FILE" "C_"
-load_env "$ENV_FILE" "E_"
-
-# Password-only mode: just print and exit
-if $PASSWORD_ONLY; then
-    printf '%s' "$C_ADMIN_PASS"
+if [[ "${2:-}" == '--password-only' ]]; then
+    env_value ADMIN_PASS "$ENV_FILE" || fail 'ADMIN_PASS is not set'
     exit 0
 fi
 
-# -----------------------------------------------------------------------------
-# Full info mode
-# -----------------------------------------------------------------------------
-
-# Status
-if docker ps --filter "label=com.docker.compose.project=$SITE" --format '{{.Names}}' | grep -q .; then
-    status="✅ Running"
-    # Get uptime from one of the containers
-    uptime=$(docker ps --filter "label=com.docker.compose.project=$SITE" --format '{{.Status}}' | head -1)
-else
-    status="⚠  Stopped"
-    uptime="(not running)"
-fi
-
-# Container list
-containers=$(docker ps -a --filter "label=com.docker.compose.project=$SITE" \
-    --format '{{.Names}} ({{.Status}})' | paste -sd ', ' -)
-
-# Volume list
-volumes=$(docker volume ls --filter "label=com.docker.compose.project=$SITE" \
-    --format '{{.Name}}' | paste -sd ', ' -)
-
-echo ""
-echo "📦 Site: $SITE"
-echo ""
-echo "   Status:      $status ($uptime)"
-echo "   URL:         $C_SITE_URL"
-echo "   Admin URL:   $C_ADMIN_URL"
-echo ""
-echo "   Stack:       WordPress $E_WP_VERSION · PHP $E_PHP_VERSION · MariaDB $E_MARIADB_VERSION"
-echo ""
-echo "   🔐 Admin login"
-echo "      Username: $C_ADMIN_USER"
-echo "      Password: $C_ADMIN_PASS"
-echo "      Email:    $C_ADMIN_EMAIL"
-echo ""
-echo "   📂 Location"
-echo "      Site dir:   $SITE_DIR"
-echo "      Containers: $containers"
-echo "      Volumes:    $volumes"
-echo ""
-echo "   📅 Created:  $C_CREATED_AT"
-echo ""
+get() { env_value "$1" "$ENV_FILE" || printf '-'; }
+printf 'Site:       %s\n' "$SITE"
+printf 'Status:     %s\n' "$(site_state "$SITE" "$SITE_DIR")"
+printf 'URL:        %s\n' "$(get SITE_URL)"
+printf 'Admin URL:  %s/wp-admin/\n' "$(get SITE_URL)"
+printf 'WordPress:  %s\n' "$(get WP_VERSION)"
+printf 'PHP:        %s\n' "$(get PHP_VERSION)"
+printf 'MariaDB:    %s\n' "$(get MARIADB_VERSION)"
+printf 'Multisite:  %s\n' "$(get MULTISITE_ENABLED)"
+printf 'Admin user: %s\n' "$(get ADMIN_USER)"
+printf 'Admin email:%s\n' " $(get ADMIN_EMAIL)"
+printf 'Directory:  %s\n' "$SITE_DIR"
+printf 'Password:   (hidden; use siteinfo %s --password-only)\n' "$SITE"
