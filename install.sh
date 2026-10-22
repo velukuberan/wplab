@@ -6,6 +6,15 @@ fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf '▶ %s\n' "$*"; }
 ok() { printf '✓ %s\n' "$*"; }
 
+case "${1:-}" in
+    --check|--setup-dns|--remove-dns)
+        root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+        exec bash "$root/bin/wplab-dns" "$1"
+        ;;
+    '') ;;
+    *) fail 'Usage: ./install.sh [--check|--setup-dns|--remove-dns]' ;;
+esac
+
 [[ ${EUID} -ne 0 ]] || fail 'Run as your normal user, not root/sudo'
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 [[ -f "$root/traefik/docker-compose.yml" && -f "$root/mailpit/docker-compose.yml" ]] || fail 'Run the installer from a complete WPLab checkout'

@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# Managed by WPLab WPL-018; do not edit.
+# Dedicated dnsmasq plus a NetworkManager-managed split-DNS dummy connection.
+set -euo pipefail
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*"; }
+[[ $# == 1 ]] || fail 'Usage: wplab-dns --check|--setup-dns|--remove-dns'
+mode=$1
+case "$mode" in --check|--setup-dns|--remove-dns) ;; *) fail 'Invalid option' ;; esac
+marker='# Managed by WPLab WPL-018; do not edit.'
+conf=/etc/wplab/dnsmasq.conf
+unit=/etc/systemd/system/wplab-dns.service
+link_helper=/usr/local/libexec/wplab-dns-nm
+record=/etc/wplab/networkmanager.uuid
+legacy=/etc/dnsmasq.d/wplab.conf
+conn=wplab-dns
+server=127.77.77.77
+ip_with_mask=${WPLAB_DNS_DUMMY_IPV4:-10.254.254.1/32}
+
+exists() { [[ -e "$1" || -L "$1" ]]; }
+owned() {
+  local first second
+  [[ -f "$1" && ! -L "$1" ]] || return 1
+  first=$(sudo head -n 1 -- "$1") || return 1
+  if [[ "$first" == '#!/usr/bin/env bash' ]]; then
+    second=$(sudo sed -n '2p' -- "$1") || return 1
+    [[ "$second" == "$marker" ]]
+  else
+    [[ "$first" == "$marker" ]]
+  fi
+}
+assert_ours_or_absent() { if exists "$1"; then owned "$1" || fail "Unmanaged or unsafe file: $1"; fi; }
+get_saved_uuid() { sudo sed -n '2p' "$record"; }
+profile_uuid() { nmcli -g connection.uuid connection show "$conn" 2>/dev/null || :; }
+check() {
+  info 'WPLab DNS diagnostics'
+  for cmd in nmcli dnsmasq resolvectl systemctl dig; do
+    if command -v "$cmd" >/dev/null; then info "  $cmd: installed"; else info "  $cmd: MISSING"; fi
+  done
+  if exists "$legacy"; then info "  Legacy rule: $legacy (migration required)"; fi
+  info "  Dedicated service: $(systemctl is-active wplab-dns.service 2>/dev/null || : )"
+  if command -v nmcli >/dev/null; then
+    info "  NetworkManager profile: $(profile_uuid)"
+  fi
+  if command -v resolvectl >/dev/null; then resolvectl query check-dns.wplab.test || :; fi
+}
+if [[ "$mode" == --check ]]; then check; exit 0; fi
+[[ $EUID -ne 0 ]] || fail 'Run as normal user; sudo will be requested for changes'
+for cmd in sudo nmcli systemctl resolvectl ip ss awk grep python3; do command -v "$cmd" >/dev/null || fail "Missing prerequisite: $cmd"; done
+systemctl is-active --quiet NetworkManager || fail 'NetworkManager is not active; refuse to alter networking (common on cloud Ubuntu)'
+systemctl is-active --quiet systemd-resolved || fail 'systemd-resolved is not active'
+[[ "$(NetworkManager --print-config 2>/dev/null | grep -E '^dns=' | tail -1)" == 'dns=systemd-resolved' ]] || fail 'NetworkManager must use dns=systemd-resolved'
+for p in "$conf" "$unit" "$link_helper" "$record"; do assert_ours_or_absent "$p"; done
+
+if [[ "$mode" == --setup-dns ]]; then
+  [[ ! -e "$legacy" && ! -L "$legacy" ]] || fail "Existing legacy rule at $legacy; manual migration required. No changes made."
+  if exists "$record"; then
+    [[ -e "$conf" && -e "$unit" && -e "$link_helper" ]] || fail 'Partial installation; inspect before retrying'
+    [[ "$(get_saved_uuid)" == "$(profile_uuid)" ]] || fail 'Profile UUID differs from WPLab ownership record'
+    if systemctl is-active --quiet wplab-dns.service; then info 'Already installed and active'; exit 0; fi
+    fail 'Managed installation exists but service is inactive; inspect journalctl -u wplab-dns.service'
+  fi
+  for p in "$conf" "$unit" "$link_helper"; do ! exists "$p" || fail 'Partial installed files; inspect before retrying'; done
+  [[ -z "$(profile_uuid)" ]] || fail "NetworkManager profile '$conn' already exists; refusing to adopt it"
+  ! ip link show "$conn" >/dev/null 2>&1 || fail "Interface '$conn' already exists; refusing to adopt it"
+  for cmd in dnsmasq dig; do command -v "$cmd" >/dev/null || fail "Missing $cmd. Install dnsmasq and dnsutils with your distribution package manager before retrying"; done
+  [[ "$ip_with_mask" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/32$ ]] || fail 'WPLAB_DNS_DUMMY_IPV4 must be an IPv4 /32 address'
+  ip_addr=${ip_with_mask%/32}
+  # Never claim an IP already assigned to this host, or one covered by an explicit route.
+  ! ip -4 route show table local | awk '{print $2}' | grep -Fxq "$ip_addr" || fail "Local IP already claimed: $ip_addr"
+  route=$(ip -4 route get "$ip_addr" 2>/dev/null || :)
+  [[ "$route" != local\ * ]] || fail "Local route already exists: $route"
+  # Conservative conflict check: reject any existing non-default IPv4 route
+  # (including VPN routes) that covers the candidate /32 address.
+  if ! ip -j -4 route show table all | python3 -c '
+import sys, json, ipaddress
+candidate=ipaddress.IPv4Address(sys.argv[1])
+for route in json.load(sys.stdin):
+    dest=route.get("dst", "default")
+    if dest == "default":
+        continue
+    try:
+        network=ipaddress.IPv4Network(dest, strict=False)
+    except ValueError:
+        continue
+    if candidate in network:
+        print(f"Conflicting route: {dest}", file=sys.stderr)
+        sys.exit(1)
+' "$ip_addr"; then
+    fail "Candidate address intersects an existing route. Pick a safe /32 and rerun."
+  fi
+  if sudo ss -H -lntup '( sport = :53 )' | grep -Fq "$server:53"; then fail "$server:53 is already occupied"; fi
+  tmp=$(mktemp -d); trap 'rm -rf -- "$tmp"' EXIT
+  cat > "$tmp/dns.conf" <<'DNS'
+# Managed by WPLab WPL-018; do not edit.
+port=53
+no-resolv
+no-hosts
+bind-interfaces
+listen-address=127.77.77.77
+local=/wplab.test/
+address=/.wplab.test/127.0.0.1
+DNS
+  cat > "$tmp/nm" <<'HELPER'
+#!/usr/bin/env bash
+# Managed by WPLab WPL-018; do not edit.
+set -euo pipefail
+uuid=$(sed -n '2p' /etc/wplab/networkmanager.uuid)
+[[ "$uuid" =~ ^[0-9a-fA-F-]{36}$ ]] || exit 1
+[[ "$(nmcli -g connection.uuid connection show wplab-dns)" == "$uuid" ]] || exit 1
+case "${1:-}" in
+  up)
+    # Query the actual listener before enabling split-DNS routing.
+    response=$(dig @127.77.77.77 -p 53 +time=1 +tries=1 +short probe.wplab.test A)
+    [[ "$response" == '127.0.0.1' ]] || { echo 'dnsmasq did not answer readiness probe' >&2; exit 1; }
+    nmcli connection up uuid "$uuid"
+    ;;
+  down)
+    nmcli connection down uuid "$uuid"
+    ;;
+  *) exit 2 ;;
+esac
+HELPER
+  cat > "$tmp/unit" <<'UNIT'
+# Managed by WPLab WPL-018; do not edit.
+[Unit]
+Description=WPLab dedicated wildcard DNS
+Requires=NetworkManager.service systemd-resolved.service
+After=NetworkManager.service systemd-resolved.service
+
+[Service]
+Type=exec
+ExecStart=/usr/sbin/dnsmasq --no-daemon --conf-file=/etc/wplab/dnsmasq.conf
+ExecStartPost=/usr/local/libexec/wplab-dns-nm up
+ExecStop=/usr/local/libexec/wplab-dns-nm down
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  dnsmasq --test --conf-file="$tmp/dns.conf" || fail 'Invalid dnsmasq configuration'
+  info "Creating isolated NetworkManager profile with $ip_with_mask (does not modify Wi-Fi/VPN profiles)"
+  sudo nmcli connection add type dummy ifname "$conn" con-name "$conn" \
+    ipv4.method manual ipv4.addresses "$ip_with_mask" ipv4.dns "$server" \
+    ipv4.dns-search '~wplab.test' ipv4.never-default yes \
+    ipv6.method disabled connection.autoconnect no
+  uuid=$(profile_uuid)
+  [[ "$uuid" =~ ^[0-9a-fA-F-]{36}$ ]] || fail 'Profile creation returned no UUID; manual cleanup required'
+  sudo install -d -m 755 /etc/wplab /usr/local/libexec
+  printf '%s\n%s\n' "$marker" "$uuid" > "$tmp/uuid"
+  sudo install -m 644 "$tmp/uuid" "$record"
+  sudo install -m 644 "$tmp/dns.conf" "$conf"
+  sudo install -m 755 "$tmp/nm" "$link_helper"
+  sudo install -m 644 "$tmp/unit" "$unit"
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now wplab-dns.service || fail 'Service failed. Inspect journalctl -u wplab-dns.service; installation preserved for inspection.'
+  result=$(resolvectl query probe.wplab.test 2>/dev/null || :)
+  [[ "$result" == *'127.0.0.1'* ]] || fail 'Split DNS not verified; inspect service and resolver status'
+  info 'WPLab dedicated DNS installed and verified'
+else
+  for p in "$conf" "$unit" "$link_helper" "$record"; do exists "$p" || fail "Incomplete installation; missing $p"; done
+  [[ "$(get_saved_uuid)" == "$(profile_uuid)" ]] || fail 'Refusing to remove profile with unexpected UUID'
+  sudo systemctl disable --now wplab-dns.service || fail 'Unable to stop service; no files removed'
+  sudo nmcli connection delete uuid "$(get_saved_uuid)" || fail 'Unable to delete WPLab profile; files preserved'
+  sudo rm -- "$unit" "$link_helper" "$conf" "$record"
+  sudo systemctl daemon-reload
+  info 'Dedicated WPLab DNS removed; legacy dnsmasq, Wi-Fi and VPN profiles unchanged'
+fi
