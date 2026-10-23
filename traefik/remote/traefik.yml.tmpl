@@ -15,6 +15,12 @@ entryPoints:
   websecure:
     address: ":443"
 
+  health:
+    address: ":8082"
+
+ping:
+  entryPoint: health
+
 providers:
   docker:
     endpoint: "tcp://socket-proxy:2375"

@@ -6,6 +6,8 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
 
 root=$(wplab_project_root)
 config="$root/config/remote.env"
+# Remote deployment is disabled until the complete lifecycle is verified.
+WPLAB_REMOTE_DEPLOYMENT_ENABLED=false
 
 load_remote_config() {
     [[ -f "$config" && ! -L "$config" ]] ||
@@ -219,6 +221,10 @@ render_remote_templates() {
         fi
 
         published_names+=("$name")
+        # Record immediately after publication for outer transaction rollback.
+        if [[ "${WPLAB_ROLLBACK_ARMED:-false}" == true ]]; then
+            record_remote_file "$destination"
+        fi
     done
 
     rm -rf -- "$temp_dir"
@@ -277,7 +283,16 @@ prepare_acme_storage() {
     [[ ! -L "$directory" && ! -L "$storage" ]] ||
         wplab_fail 'Unsafe ACME storage symlink detected'
 
-    install -d -m 700 "$directory"
+    if [[ -e "$directory" ]]; then
+        [[ -d "$directory" && -O "$directory" ]] ||
+            wplab_fail 'ACME directory has unexpected ownership or type'
+
+        [[ "$(stat -c '%a' "$directory")" == 700 ]] ||
+            wplab_fail 'Existing ACME directory must have permissions 700'
+    else
+        install -d -m 700 "$directory" ||
+            wplab_fail 'Unable to create ACME directory'
+    fi
 
     # Create only when absent. Never overwrite existing certificates.
     if [[ ! -e "$storage" ]]; then
@@ -289,6 +304,12 @@ prepare_acme_storage() {
 
         wplab_ok 'Preserving existing ACME certificate storage'
     fi
+
+    [[ -O "$directory" && -O "$storage" ]] ||
+        wplab_fail 'ACME storage must be owned by the installation user'
+
+    [[ "$(stat -c '%a' "$directory")" == 700 ]] ||
+        wplab_fail 'ACME directory must have permissions 700'
 
     [[ "$(stat -c '%a' "$storage")" == 600 ]] ||
         wplab_fail 'ACME storage must have permissions 600'
@@ -355,6 +376,128 @@ configure_runtime_identity() {
     wplab_ok "Runtime identity configured (UID=$WPLAB_UID, GID=$WPLAB_GID)"
 }
 
+validate_remote_networks() {
+    local network driver internal
+
+    printf '\nShared Docker network checks:\n'
+
+    for network in web wplab-mail; do
+        if ! docker network inspect "$network" >/dev/null 2>&1; then
+            printf '  MISSING: %s (will require creation)\n' "$network"
+            continue
+        fi
+
+        driver=$(docker network inspect "$network" \
+            --format '{{.Driver}}')
+
+        internal=$(docker network inspect "$network" \
+            --format '{{.Internal}}')
+
+        [[ "$driver" == "bridge" ]] ||
+            wplab_fail "Network '$network' must use the bridge driver"
+
+        [[ "$internal" == "false" ]] ||
+            wplab_fail "Network '$network' is unexpectedly internal"
+
+        printf '  VALID: %s (existing bridge network)\n' "$network"
+    done
+}
+
+# Networks created during the current installation.
+# Used later for controlled rollback.
+WPLAB_CREATED_NETWORKS=()
+WPLAB_CREATED_NETWORK_IDS=()
+
+prepare_remote_networks() {
+    local network network_list
+
+    # Revalidate before making changes.
+    validate_remote_networks
+
+    for network in web wplab-mail; do
+        if docker network inspect "$network" >/dev/null 2>&1; then
+            wplab_ok "Preserving existing Docker network: $network"
+            continue
+        fi
+
+        # Confirm Docker is responsive before treating the network as missing.
+        docker info >/dev/null 2>&1 ||
+            wplab_fail 'Docker daemon is unavailable during network preparation'
+
+        # Inspect network names through an independent Docker query.
+        network_list=$(docker network ls --format '{{.Name}}') ||
+            wplab_fail 'Unable to list Docker networks'
+
+        if grep -Fxq -- "$network" <<< "$network_list"; then
+            wplab_fail "Network '$network' exists but inspection failed"
+        fi
+
+        # Docker returns the created network ID directly.
+        # Capture it before performing any further operations.
+        local network_id
+        network_id=$(docker network create \
+            --driver bridge \
+            "$network") ||
+            wplab_fail "Unable to create Docker network: $network"
+
+        [[ -n "$network_id" ]] ||
+            wplab_fail "Docker returned no ID for created network: $network"
+
+        WPLAB_CREATED_NETWORKS+=("$network")
+        WPLAB_CREATED_NETWORK_IDS+=("$network_id")
+
+        wplab_ok "Created Docker network: $network"
+    done
+
+    # Confirm the resulting networks meet our requirements.
+    validate_remote_networks
+}
+
+rollback_remote_networks() {
+    local index network expected_id current_id container_count
+
+    for ((index=${#WPLAB_CREATED_NETWORKS[@]}-1; index>=0; index--)); do
+        network="${WPLAB_CREATED_NETWORKS[$index]}"
+        expected_id="${WPLAB_CREATED_NETWORK_IDS[$index]:-}"
+
+        [[ -n "$expected_id" ]] || {
+            wplab_info "Skipping rollback: network '$network' has no recorded ID"
+            continue
+        }
+
+        # Never delete the shared ingress network.
+        [[ "$network" != "web" ]] || continue
+
+        current_id=$(docker network inspect "$network" \
+            --format '{{.Id}}') || {
+            wplab_info "Skipping rollback: cannot inspect network '$network'"
+            continue
+        }
+
+        if [[ "$current_id" != "$expected_id" ]]; then
+            wplab_info "Skipping rollback: network '$network' identity changed"
+            continue
+        fi
+
+        container_count=$(docker network inspect "$network" \
+            --format '{{len .Containers}}') || {
+            wplab_info "Skipping rollback: cannot inspect containers on '$network'"
+            continue
+        }
+
+        if [[ "$container_count" != "0" ]]; then
+            wplab_info "Skipping rollback: network '$network' has attached containers"
+            continue
+        fi
+
+        if docker network rm "$expected_id" >/dev/null; then
+            wplab_ok "Rolled back Docker network: $network"
+        else
+            wplab_info "Could not roll back Docker network: $network"
+        fi
+    done
+}
+
 validate_remote_compose() {
     local project_root
     project_root="$(wplab_project_root)"
@@ -377,14 +520,117 @@ validate_remote_compose() {
     wplab_ok 'Remote Docker Compose configuration is valid'
 }
 
+validate_remote_mailpit_compose() {
+    local compose_file="$root/mailpit/remote/docker-compose.yml"
+
+    [[ -f "$compose_file" && ! -L "$compose_file" ]] ||
+        wplab_fail "Remote Mailpit Compose file missing or unsafe: $compose_file"
+
+    [[ -n "${WPLAB_DOMAIN:-}" ]] ||
+        wplab_fail 'WPLAB_DOMAIN is required for remote Mailpit'
+
+    WPLAB_DOMAIN="$WPLAB_DOMAIN" \
+        docker compose \
+        -f "$compose_file" \
+        config --quiet ||
+        wplab_fail 'Remote Mailpit Compose configuration is invalid'
+
+    wplab_ok 'Remote Mailpit Compose configuration is valid'
+}
+
+detect_remote_installation_state() {
+    local identity="$HOME/.config/wplab/environment.env"
+    local runtime="$root/traefik/remote"
+    local resource
+    local -a resources=(
+        "$runtime/traefik.yml"
+        "$runtime/dynamic.yml"
+        "$runtime/letsencrypt"
+        "$runtime/letsencrypt/acme.json"
+        "$runtime/dashboard-users"
+    )
+
+    if [[ -e "$identity" || -L "$identity" ]]; then
+        # An installation identity alone does not prove
+        # that the installation completed successfully.
+        for resource in "${resources[@]}"; do
+            if [[ ! -e "$resource" || -L "$resource" ]]; then
+                WPLAB_INSTALL_STATE="partial"
+                wplab_info "Incomplete WPLab installation: $resource"
+                return 0
+            fi
+        done
+
+        # Validate resource types before classifying as existing.
+        if [[ ! -f "$identity" || -L "$identity" ||
+              ! -d "$runtime/letsencrypt" || -L "$runtime/letsencrypt" ]]; then
+            WPLAB_INSTALL_STATE="partial"
+            wplab_info "Unsafe installation identity or ACME directory"
+            return 0
+        fi
+
+        for resource in \
+            "$runtime/traefik.yml" \
+            "$runtime/dynamic.yml" \
+            "$runtime/letsencrypt/acme.json" \
+            "$runtime/dashboard-users"; do
+
+            if [[ ! -f "$resource" || -L "$resource" ]]; then
+                WPLAB_INSTALL_STATE="partial"
+                wplab_info "Unexpected installation resource type: $resource"
+                return 0
+            fi
+        done
+
+        # An existing installation must have a valid identity.
+        # Reject malformed, incorrectly owned, or conflicting configurations.
+        # Validate ownership and permissions of runtime resources.
+        [[ -O "$runtime/letsencrypt" ]] ||
+            wplab_fail 'ACME directory has unexpected ownership'
+
+        [[ "$(stat -c '%a' "$runtime/letsencrypt")" == 700 ]] ||
+            wplab_fail 'ACME directory must have permissions 700'
+
+        for resource in \
+            "$runtime/traefik.yml" \
+            "$runtime/dynamic.yml" \
+            "$runtime/letsencrypt/acme.json" \
+            "$runtime/dashboard-users"; do
+
+            [[ -O "$resource" ]] ||
+                wplab_fail "Unexpected runtime file ownership: $resource"
+
+            [[ "$(stat -c '%a' "$resource")" == 600 ]] ||
+                wplab_fail "Runtime file must have permissions 600: $resource"
+        done
+
+        WPLAB_INSTALL_STATE="existing"
+        wplab_info "Existing WPLab installation files and identity verified"
+        return 0
+    fi
+
+    for resource in "${resources[@]}"; do
+        if [[ -e "$resource" || -L "$resource" ]]; then
+            WPLAB_INSTALL_STATE="partial"
+            wplab_info "Partial WPLab installation detected: $resource"
+            return 0
+        fi
+    done
+
+    WPLAB_INSTALL_STATE="fresh"
+    wplab_ok "Fresh WPLab installation detected"
+}
+
 preflight_remote() {
     load_remote_config
     wplab_validate_environment remote "$WPLAB_DOMAIN"
+    detect_remote_installation_state
     validate_remote_secrets
     check_python_dependencies
     check_auth_dependencies
     check_remote_infrastructure
     validate_container_ownership
+    validate_remote_networks
 }
 
 check_remote() {
@@ -397,16 +643,271 @@ check_remote() {
     wplab_info 'Diagnostics complete. No changes made.'
 }
 
+# WPLAB_TRANSACTION_V1 — candidate remote install transaction.
+# These arrays only track resources created by THIS installer process.
+WPLAB_CREATED_FILES=()
+WPLAB_CREATED_FILE_INODES=()
+# Only IDs observed immediately after our own Compose startup are rollback-eligible.
+WPLAB_CREATED_CONTAINER_IDS=()
+WPLAB_CREATED_CONTAINER_NAMES=()
+
+record_remote_file() {
+    local file="$1"
+    [[ -f "$file" && ! -L "$file" && -O "$file" ]] ||
+        wplab_fail "Cannot record unowned runtime file: $file"
+    local inode
+    inode=$(stat -c '%d:%i' -- "$file") || wplab_fail "Cannot identify file: $file"
+    WPLAB_CREATED_FILES+=("$file")
+    WPLAB_CREATED_FILE_INODES+=("$inode")
+}
+
+# Never replace the user's dashboard password or accept a pre-existing auth file.
+create_remote_dashboard_auth() {
+    local path="$root/traefik/remote/dashboard-users"
+    local password confirm tmp
+    [[ ! -e "$path" && ! -L "$path" ]] ||
+        wplab_fail "Dashboard credentials already exist: $path"
+    [[ -t 0 ]] || wplab_fail 'Interactive terminal required for new dashboard password'
+    read -r -s -p 'WPLab dashboard password: ' password
+    printf '\n'
+    read -r -s -p 'Confirm dashboard password: ' confirm
+    printf '\n'
+    [[ -n "$password" && "$password" == "$confirm" ]] ||
+        wplab_fail 'Dashboard password missing or confirmation does not match'
+    [[ ${#password} -ge 12 ]] || wplab_fail 'Dashboard password must have at least 12 characters'
+    tmp=$(mktemp "$root/traefik/remote/.dashboard-users.XXXXXXXX") ||
+        wplab_fail 'Unable to stage dashboard authentication'
+    chmod 600 "$tmp"
+    # Feed the password over stdin (never as a command-line argument).
+    if ! printf '%s\n' "$password" | htpasswd -nBi admin > "$tmp"; then
+        rm -f -- "$tmp"
+        wplab_fail 'Unable to generate dashboard bcrypt credentials'
+    fi
+    unset password confirm
+    if ! ln -- "$tmp" "$path"; then
+        rm -f -- "$tmp"
+        wplab_fail 'Cannot publish dashboard authentication without overwrite'
+    fi
+    record_remote_file "$path"
+    rm -f -- "$tmp"
+    wplab_ok 'Dashboard authentication created'
+}
+
+validate_fresh_container_absence() {
+    local name
+    for name in wplab-traefik wplab-socket-proxy wplab-mailpit; do
+        if docker container inspect "$name" >/dev/null 2>&1; then
+            wplab_fail "Fresh installation cannot adopt existing container: $name"
+        fi
+    done
+}
+
+# Compare container name AND project/service labels, plus the WPLab-specific
+# management label. An unrelated container must never be removed.
+remote_container_owned() {
+    local name="$1" expected_project="$2" expected_service="$3" labels
+    labels=$(docker container inspect "$name" --format \
+        '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "wplab.managed"}}' 2>/dev/null) || return 1
+    [[ "$labels" == "$expected_project|$expected_service|true" ]]
+}
+
+# Capture IDs immediately after a Compose invocation, including a failed one.
+# A concurrent actor can still race with creation; unknown IDs are left intact.
+track_remote_containers() {
+    local name project service id
+    while read -r name project service; do
+        remote_container_owned "$name" "$project" "$service" || continue
+        id=$(docker container inspect "$name" --format '{{.Id}}' 2>/dev/null) || continue
+        [[ -n "$id" ]] || continue
+        WPLAB_CREATED_CONTAINER_NAMES+=("$name")
+        WPLAB_CREATED_CONTAINER_IDS+=("$id")
+    done
+}
+
+rollback_remote_containers() {
+    local index name id current_id project service
+    for ((index=${#WPLAB_CREATED_CONTAINER_IDS[@]}-1; index>=0; index--)); do
+        name="${WPLAB_CREATED_CONTAINER_NAMES[$index]}"
+        id="${WPLAB_CREATED_CONTAINER_IDS[$index]}"
+        case "$name" in
+            wplab-mailpit) project=wplab-remote-mailpit; service=mailpit ;;
+            wplab-traefik) project=wplab-remote-traefik; service=traefik ;;
+            wplab-socket-proxy) project=wplab-remote-traefik; service=socket-proxy ;;
+            *) continue ;;
+        esac
+        current_id=$(docker container inspect "$name" --format '{{.Id}}' 2>/dev/null) || continue
+        if [[ "$current_id" != "$id" ]] ||
+           ! remote_container_owned "$name" "$project" "$service"; then
+            wplab_info "Preserving changed or unverified container: $name"
+            continue
+        fi
+        docker container rm -f "$id" >/dev/null ||
+            wplab_info "Manual cleanup may be required for container: $name"
+    done
+}
+
+rollback_remote_files() {
+    local i path expected inode
+    for ((i=${#WPLAB_CREATED_FILES[@]}-1; i>=0; i--)); do
+        path="${WPLAB_CREATED_FILES[$i]}"
+        expected="${WPLAB_CREATED_FILE_INODES[$i]}"
+        if [[ ! -f "$path" || -L "$path" || ! -O "$path" ]]; then
+            wplab_info "Preserving changed runtime path: $path"
+            continue
+        fi
+        inode=$(stat -c '%d:%i' -- "$path") || continue
+        [[ "$inode" == "$expected" ]] || {
+            wplab_info "Preserving changed runtime inode: $path"
+            continue
+        }
+        # Never delete certificate data after Traefik has written to it.
+        if [[ "$path" == */acme.json && -s "$path" ]]; then
+            wplab_info "Preserving nonempty ACME certificate store: $path"
+            continue
+        fi
+        rm -f -- "$path" || wplab_info "Unable to roll back runtime file: $path"
+    done
+    local directory="$root/traefik/remote/letsencrypt"
+    # rmdir only removes a directory if empty; existing folders are untouched.
+    if [[ "${WPLAB_CREATED_ACME_DIRECTORY:-false}" == true && -d "$directory" && ! -L "$directory" && -O "$directory" ]]; then
+        rmdir -- "$directory" 2>/dev/null || :
+    fi
+}
+
+start_remote_infrastructure() {
+    local tfile="$root/traefik/remote/docker-compose.yml"
+    local mfile="$root/mailpit/remote/docker-compose.yml"
+    local secrets="$root/config/remote.secrets.env"
+    local result=0
+
+    # Capture created IDs on both success and failure. Never adopt a
+    # pre-existing named container (validated before mutation).
+    docker compose --env-file "$secrets" -f "$tfile" up -d || result=$?
+    track_remote_containers <<'TRAEFIK_CONTAINERS'
+wplab-socket-proxy wplab-remote-traefik socket-proxy
+wplab-traefik wplab-remote-traefik traefik
+TRAEFIK_CONTAINERS
+    [[ "$result" == 0 ]] ||
+        wplab_fail 'Failed starting WPLab Traefik infrastructure'
+
+    result=0
+    WPLAB_DOMAIN="$WPLAB_DOMAIN" docker compose -f "$mfile" up -d || result=$?
+    track_remote_containers <<'MAILPIT_CONTAINERS'
+wplab-mailpit wplab-remote-mailpit mailpit
+MAILPIT_CONTAINERS
+    [[ "$result" == 0 ]] ||
+        wplab_fail 'Failed starting WPLab Mailpit infrastructure'
+}
+
+# Docker image/Compose health checks provide the application-level readiness
+# signal. Socket proxy has no health check; Traefik's Docker-provider health
+# is not independently proven by the Traefik ping endpoint.
+verify_remote_containers() {
+    local name project service status health attempt
+    local max_attempts=12
+
+    while read -r name project service; do
+        remote_container_owned "$name" "$project" "$service" ||
+            wplab_fail "WPLab container ownership verification failed: $name"
+        status=$(docker container inspect "$name" --format '{{.State.Running}}') ||
+            wplab_fail "Cannot inspect WPLab container: $name"
+        [[ "$status" == true ]] || wplab_fail "WPLab container is not running: $name"
+
+        # Socket-proxy currently has no Docker health check.
+        [[ "$service" != socket-proxy ]] || continue
+
+        for ((attempt=1; attempt<=max_attempts; attempt++)); do
+            # If the service stops while warming up, abort immediately.
+            status=$(docker container inspect "$name" --format '{{.State.Running}}') ||
+                wplab_fail "Cannot re-inspect WPLab container: $name"
+            [[ "$status" == true ]] ||
+                wplab_fail "WPLab container stopped during readiness: $name"
+
+            health=$(docker container inspect "$name" --format \
+                '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}') ||
+                wplab_fail "Cannot inspect WPLab health status: $name"
+            case "$health" in
+                healthy)
+                    wplab_ok "WPLab service healthy: $name"
+                    break
+                    ;;
+                starting|unhealthy)
+                    if (( attempt == max_attempts )); then
+                        wplab_fail "WPLab service not healthy ($health): $name"
+                    fi
+                    ;;
+                none)
+                    wplab_fail "WPLab service has no health check: $name"
+                    ;;
+                *)
+                    wplab_fail "Unexpected health status '$health': $name"
+                    ;;
+            esac
+            sleep 5
+        done
+    done <<'WPLAB_CONTAINERS'
+wplab-traefik wplab-remote-traefik traefik
+wplab-socket-proxy wplab-remote-traefik socket-proxy
+wplab-mailpit wplab-remote-mailpit mailpit
+WPLAB_CONTAINERS
+    wplab_ok 'Remote infrastructure running; Traefik and Mailpit healthy'
+}
+
+# Installation rollback is armed only after preflight succeeds.
+WPLAB_ROLLBACK_ARMED=false
+
+remote_install_exit_handler() {
+    local exit_status=$?
+
+    trap - EXIT
+
+    if [[ "$WPLAB_ROLLBACK_ARMED" == "true" &&
+          "$exit_status" -ne 0 ]]; then
+        wplab_info 'Remote installation failed; checking rollback'
+
+        # Remove only containers with verified project/service/management labels.
+        rollback_remote_containers ||
+            wplab_info 'Container rollback incomplete; manual inspection required'
+        rollback_remote_files ||
+            wplab_info 'Runtime file rollback incomplete; manual inspection required'
+        rollback_remote_networks ||
+            wplab_info 'Network rollback incomplete; manual inspection required'
+    fi
+
+    return "$exit_status"
+}
+
 case "${1:-}" in
     --check)
         check_remote
         ;;
     '')
+        # Fail before acquiring locks or modifying any runtime state.
+        [[ "$WPLAB_REMOTE_DEPLOYMENT_ENABLED" == "true" ]] ||
+            wplab_fail 'Remote deployment is disabled until installation and rollback are complete'
+
         acquire_install_lock
+
+        # Register cleanup for installation failures.
+        # Rollback remains disarmed until resource creation begins.
+        trap remote_install_exit_handler EXIT
 
         # Installation is deliberately disabled while the preflight still only
         # warns about port conflicts and container ownership is not enforced.
         preflight_remote
+
+        # Never automatically overwrite an incomplete installation.
+        if [[ "$WPLAB_INSTALL_STATE" == "partial" ]]; then
+            wplab_fail \
+                'Partial WPLab installation detected. Manual inspection required.'
+        fi
+
+        # Existing installations require a separate upgrade workflow.
+        if [[ "$WPLAB_INSTALL_STATE" == "existing" ]]; then
+            wplab_fail \
+                'WPLab is already installed. Reinstallation is not supported yet.'
+        fi
+
         validate_remote_ports
 
         # Determine the user that will run Traefik.
@@ -414,14 +915,33 @@ case "${1:-}" in
 
         # Validate Compose before modifying runtime files.
         validate_remote_compose
+        validate_remote_mailpit_compose
 
-        # Render and validate both Traefik configuration files.
+        # Fresh-only install: never adopt even an owned, pre-existing container.
+        validate_fresh_container_absence
+
+        # Mutating operations begin here; arm the EXIT rollback handler.
+        WPLAB_ROLLBACK_ARMED=true
+
         render_remote_templates
+        create_remote_dashboard_auth
 
-        # Only execute after all safety checks pass.
+        # Record whether the ACME directory is newly created.
+        if [[ ! -e "$root/traefik/remote/letsencrypt" ]]; then
+            WPLAB_CREATED_ACME_DIRECTORY=true
+        fi
         prepare_acme_storage
+        record_remote_file "$root/traefik/remote/letsencrypt/acme.json"
 
-        wplab_fail 'Remote installation is not implemented yet. No changes made.'
+        prepare_remote_networks
+        start_remote_infrastructure
+        verify_remote_containers
+
+        # Only a verified installation gets persistent identity.
+        wplab_write_environment remote "$WPLAB_DOMAIN"
+        WPLAB_ROLLBACK_ARMED=false
+        trap - EXIT
+        wplab_ok 'Remote installation completed'
         ;;
     *)
         wplab_fail "Unsupported remote installer argument: $1"
