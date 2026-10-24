@@ -33,7 +33,9 @@ docker() { echo "UNEXPECTED docker call: $*" >&2; return 99; }
 fixture() {
     root="$(mktemp -d)"
     trap 'rm -rf -- "$root"' EXIT
-    mkdir -p "$root/traefik/remote" "$root/mailpit/remote" "$root/config"
+    HOME="$root/home"
+    export HOME
+    mkdir -p "$HOME" "$root/traefik/remote" "$root/mailpit/remote" "$root/config"
     : > "$root/traefik/remote/docker-compose.yml"
     : > "$root/mailpit/remote/docker-compose.yml"
     : > "$root/config/remote.secrets.env"

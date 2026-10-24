@@ -346,7 +346,9 @@ python3 - \
     "$SITE_DIR/docker-compose.yml" \
     "$SITE" \
     "$SITE_HOST" \
-    "$TRAEFIK_HOST_RULE" <<'PY'
+    "$TRAEFIK_HOST_RULE" \
+    "$MULTISITE_ENABLED" \
+    "$MULTISITE_MODE" <<'PY'
 from pathlib import Path
 import sys
 
@@ -359,6 +361,22 @@ replacements = {
 }
 
 content = path.read_text(encoding="utf-8")
+
+# Only subdomain multisite needs a second-level wildcard certificate.
+# Traefik's shared wildcard already covers ordinary and subdirectory sites.
+tls_labels = ""
+if sys.argv[5] == "true" and sys.argv[6] == "subdomain":
+    site = sys.argv[2]
+    host = sys.argv[3]
+    router = f"traefik.http.routers.{site}.tls"
+    tls_labels = "\n".join([
+        f'      - "{router}.certresolver=dnsresolver"',
+        f'      - "{router}.domains[0].main={host}"',
+        f'      - "{router}.domains[0].sans=*.{host}"',
+    ])
+
+assert content.count("__WPLAB_TLS_LABELS__") == 1, "TLS label placeholder missing"
+content = content.replace("__WPLAB_TLS_LABELS__", tls_labels)
 
 for placeholder, value in replacements.items():
     content = content.replace(placeholder, value)
