@@ -1,0 +1,21 @@
+http:
+  routers:
+    dashboard:
+      rule: "Host(`traefik.${WPLAB_DOMAIN}`)"
+      entryPoints:
+        - websecure
+      service: api@internal
+      middlewares:
+        - dashboard-auth
+      tls:
+        certResolver: dnsresolver
+        domains:
+          - main: "${WPLAB_DOMAIN}"
+            sans:
+              - "*.${WPLAB_DOMAIN}"
+
+  middlewares:
+    dashboard-auth:
+      basicAuth:
+        usersFile: /run/wplab-auth/dashboard-users
+        removeHeader: true

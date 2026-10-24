@@ -4,6 +4,20 @@ traefik/.env
 # Local TLS certificates
 traefik/certs/
 
+# ─── Remote configuration / secrets ──────────
+/config/remote.env
+/config/remote.secrets.env
+
+# Generated remote Traefik configuration
+/traefik/remote/traefik.yml
+/traefik/remote/dynamic.yml
+
+# Remote Let's Encrypt certificates and account state
+/traefik/remote/letsencrypt/
+
+# Dashboard authentication credentials
+/traefik/remote/dashboard-users
+
 # ─── Runtime state ───────────────────────────
 # Live WordPress sites — user data, not infra code
 sites/

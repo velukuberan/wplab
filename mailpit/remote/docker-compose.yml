@@ -1,0 +1,36 @@
+name: wplab-remote-mailpit
+
+services:
+  mailpit:
+    image: axllent/mailpit:v1.31.5
+    container_name: wplab-mailpit
+    restart: unless-stopped
+
+    environment:
+      MP_DATABASE: /data/mailpit.db
+      MP_MAX_MESSAGES: 5000
+
+    volumes:
+      - mailpit_data:/data
+
+    networks:
+      - web
+      - wplab-mail
+
+    labels:
+      - "traefik.enable=true"
+      - "wplab.managed=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.mailpit.rule=Host(`mail.${WPLAB_DOMAIN:?WPLAB_DOMAIN is required}`)"
+      - "traefik.http.routers.mailpit.entrypoints=websecure"
+      - "traefik.http.routers.mailpit.tls=true"
+      - "traefik.http.services.mailpit.loadbalancer.server.port=8025"
+
+volumes:
+  mailpit_data:
+
+networks:
+  web:
+    external: true
+  wplab-mail:
+    external: true
