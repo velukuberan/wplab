@@ -1061,4 +1061,3 @@ case "${1:-}" in
         wplab_fail "Unsupported remote installer argument: $1"
         ;;
 esac
-
