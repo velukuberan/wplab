@@ -204,6 +204,8 @@ case_exit_trap() {
     rollback_remote_containers() { printf 'C'; }
     rollback_remote_files() { printf 'F'; }
     rollback_remote_networks() { printf 'N'; }
+    rollback_compose_socket_network() { :; }
+    report_mailpit_volume() { :; }
     local output
     output="$( (WPLAB_ROLLBACK_ARMED=false; trap remote_install_exit_handler EXIT; exit 1) )" || :
     [[ "$output" != *CFN* ]] || return 1

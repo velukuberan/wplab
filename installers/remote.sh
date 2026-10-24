@@ -453,6 +453,103 @@ prepare_remote_networks() {
     validate_remote_networks
 }
 
+# Compose creates its private socket network implicitly. Only a network observed
+# absent before startup and identified by Docker labels may be rolled back.
+WPLAB_COMPOSE_SOCKET_WAS_ABSENT=false
+WPLAB_COMPOSE_SOCKET_ID=""
+
+check_compose_socket_absent() {
+    local name=wplab-remote-traefik_socket
+    WPLAB_COMPOSE_SOCKET_WAS_ABSENT=false
+    if docker network inspect "$name" >/dev/null 2>&1; then
+        wplab_fail "Existing Compose socket network requires manual review: $name"
+    fi
+    WPLAB_COMPOSE_SOCKET_WAS_ABSENT=true
+}
+
+track_compose_socket_network() {
+    local name=wplab-remote-traefik_socket identity
+    [[ "$WPLAB_COMPOSE_SOCKET_WAS_ABSENT" == true ]] || return 0
+    identity=$(docker network inspect "$name" --format \
+        '{{.Id}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}}' 2>/dev/null) || return 0
+    case "$identity" in
+        *'|wplab-remote-traefik|socket')
+            WPLAB_COMPOSE_SOCKET_ID="${identity%%|*}"
+            ;;
+        *) wplab_info "Unverified Compose socket network; preserving: $name" ;;
+    esac
+}
+
+rollback_compose_socket_network() {
+    local name=wplab-remote-traefik_socket identity count
+    [[ -n "$WPLAB_COMPOSE_SOCKET_ID" ]] || return 0
+    identity=$(docker network inspect "$name" --format \
+        '{{.Id}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}}' 2>/dev/null) || return 0
+    [[ "$identity" == "$WPLAB_COMPOSE_SOCKET_ID|wplab-remote-traefik|socket" ]] || {
+        wplab_info 'Preserving changed Compose socket network'
+        return 0
+    }
+    count=$(docker network inspect "$name" --format '{{len .Containers}}') || return 0
+    [[ "$count" == 0 ]] || {
+        wplab_info 'Preserving Compose socket network with attached containers'
+        return 0
+    }
+    docker network rm "$WPLAB_COMPOSE_SOCKET_ID" >/dev/null ||
+        wplab_info 'Compose socket network requires manual cleanup'
+}
+
+# A Mailpit data volume is persistent data, never a rollback target.
+report_mailpit_volume() {
+    local volume=wplab-remote-mailpit_mailpit_data project
+    project=$(docker volume inspect "$volume" --format \
+        '{{index .Labels "com.docker.compose.project"}}' 2>/dev/null) || return 0
+    if [[ "$project" == wplab-remote-mailpit ]]; then
+        wplab_info "Preserving persistent Mailpit volume: $volume"
+    fi
+}
+
+# Recovery is intentionally limited to the observed interrupted-install case:
+# only a private ACME directory with a valid existing ACME JSON file remains.
+# Other partial states require manual investigation, not automatic adoption.
+validate_acme_only_recovery() {
+    local runtime="$root/traefik/remote" path
+    [[ "$WPLAB_INSTALL_STATE" == partial ]] ||
+        wplab_fail 'Recovery requires a partial installation'
+    [[ ! -e "$HOME/.config/wplab/environment.env" &&
+       ! -L "$HOME/.config/wplab/environment.env" ]] ||
+        wplab_fail 'Recovery refuses an existing installation identity'
+    for path in traefik.yml dynamic.yml dashboard-users; do
+        [[ ! -e "$runtime/$path" && ! -L "$runtime/$path" ]] ||
+            wplab_fail "Recovery refuses existing runtime configuration: $path"
+    done
+    [[ -d "$runtime/letsencrypt" && ! -L "$runtime/letsencrypt" &&
+       -O "$runtime/letsencrypt" ]] || wplab_fail 'Unsafe ACME directory for recovery'
+    [[ $(stat -c '%a' "$runtime/letsencrypt") == 700 ]] ||
+        wplab_fail 'Recovery ACME directory requires permissions 700'
+    # Reject unexpected sibling resources; this is not a general repair tool.
+    local entry
+    shopt -s nullglob dotglob
+    for entry in "$runtime/letsencrypt"/*; do
+        [[ "$entry" == "$runtime/letsencrypt/acme.json" ]] ||
+            wplab_fail "Unexpected recovery ACME resource: $entry"
+    done
+    shopt -u nullglob dotglob
+    path="$runtime/letsencrypt/acme.json"
+    [[ -f "$path" && ! -L "$path" && -O "$path" && -s "$path" ]] ||
+        wplab_fail 'Recovery requires an owned, nonempty ACME file'
+    [[ $(stat -c '%a' "$path") == 600 ]] ||
+        wplab_fail 'Recovery ACME file requires permissions 600'
+    # Fail closed on malformed JSON or unexpected resolver structure.
+    python3 - "$path" <<'PYACME' || wplab_fail 'Unsafe ACME JSON for recovery'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    data = json.load(f)
+assert isinstance(data, dict) and isinstance(data.get('dnsresolver'), dict)
+assert isinstance(data['dnsresolver'].get('Account'), dict)
+PYACME
+    wplab_ok 'Preserved ACME account verified for explicit recovery'
+}
+
 rollback_remote_networks() {
     local index network expected_id current_id container_count
 
@@ -780,9 +877,12 @@ start_remote_infrastructure() {
     local secrets="$root/config/remote.secrets.env"
     local result=0
 
+    check_compose_socket_absent
+
     # Capture created IDs on both success and failure. Never adopt a
     # pre-existing named container (validated before mutation).
     docker compose --env-file "$secrets" -f "$tfile" up -d || result=$?
+    track_compose_socket_network
     track_remote_containers <<'TRAEFIK_CONTAINERS'
 wplab-socket-proxy wplab-remote-traefik socket-proxy
 wplab-traefik wplab-remote-traefik traefik
@@ -795,6 +895,7 @@ TRAEFIK_CONTAINERS
     track_remote_containers <<'MAILPIT_CONTAINERS'
 wplab-mailpit wplab-remote-mailpit mailpit
 MAILPIT_CONTAINERS
+    report_mailpit_volume
     [[ "$result" == 0 ]] ||
         wplab_fail 'Failed starting WPLab Mailpit infrastructure'
 }
@@ -870,8 +971,11 @@ remote_install_exit_handler() {
             wplab_info 'Container rollback incomplete; manual inspection required'
         rollback_remote_files ||
             wplab_info 'Runtime file rollback incomplete; manual inspection required'
+        rollback_compose_socket_network ||
+            wplab_info 'Socket network rollback incomplete; manual inspection required'
         rollback_remote_networks ||
             wplab_info 'Network rollback incomplete; manual inspection required'
+        report_mailpit_volume || :
     fi
 
     return "$exit_status"
@@ -881,7 +985,9 @@ case "${1:-}" in
     --check)
         check_remote
         ;;
-    '')
+    ''|--recover)
+        local_recovery=false
+        [[ "${1:-}" != --recover ]] || local_recovery=true
         # Fail before acquiring locks or modifying any runtime state.
         [[ "$WPLAB_REMOTE_DEPLOYMENT_ENABLED" == "true" ]] ||
             wplab_fail 'Remote deployment is disabled until installation and rollback are complete'
@@ -896,8 +1002,13 @@ case "${1:-}" in
         # warns about port conflicts and container ownership is not enforced.
         preflight_remote
 
+        # Recovery is explicit and only accepts the narrow ACME-only state.
+        if [[ "$local_recovery" == true ]]; then
+            validate_acme_only_recovery
+        fi
+
         # Never automatically overwrite an incomplete installation.
-        if [[ "$WPLAB_INSTALL_STATE" == "partial" ]]; then
+        if [[ "$WPLAB_INSTALL_STATE" == "partial" && "$local_recovery" != true ]]; then
             wplab_fail \
                 'Partial WPLab installation detected. Manual inspection required.'
         fi
@@ -931,7 +1042,10 @@ case "${1:-}" in
             WPLAB_CREATED_ACME_DIRECTORY=true
         fi
         prepare_acme_storage
-        record_remote_file "$root/traefik/remote/letsencrypt/acme.json"
+        # Do not track a pre-existing ACME file for deletion on recovery.
+        if [[ "$local_recovery" != true ]]; then
+            record_remote_file "$root/traefik/remote/letsencrypt/acme.json"
+        fi
 
         prepare_remote_networks
         start_remote_infrastructure

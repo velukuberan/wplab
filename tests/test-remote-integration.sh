@@ -44,6 +44,9 @@ case_startup_order() {
     fixture
     WPLAB_DOMAIN=test.vkuberan.in
     track_remote_containers() { :; }
+    check_compose_socket_absent() { :; }
+    track_compose_socket_network() { :; }
+    report_mailpit_volume() { :; }
     local log="$root/calls"
     docker() {
         if [[ "$*" == *"$root/mailpit/remote/docker-compose.yml"* ]]; then
@@ -63,6 +66,9 @@ case_startup_failure_stops_second_stage() {
     fixture
     WPLAB_DOMAIN=test.vkuberan.in
     track_remote_containers() { :; }
+    check_compose_socket_absent() { :; }
+    track_compose_socket_network() { :; }
+    report_mailpit_volume() { :; }
     local log="$root/calls" result
     docker() { printf '%s\n' "$*" >> "$log"; return 1; }
     if result="$(start_remote_infrastructure 2>&1)"; then
@@ -163,6 +169,8 @@ case_rollback_order_and_exit_code() {
     rollback_remote_containers() { printf 'containers\n' >> "$log"; }
     rollback_remote_files() { printf 'files\n' >> "$log"; }
     rollback_remote_networks() { printf 'networks\n' >> "$log"; }
+    rollback_compose_socket_network() { :; }
+    report_mailpit_volume() { :; }
     (
         WPLAB_ROLLBACK_ARMED=true
         trap remote_install_exit_handler EXIT
@@ -179,6 +187,8 @@ case_success_no_rollback() {
     rollback_remote_containers() { printf 'unexpected\n' >> "$log"; }
     rollback_remote_files() { printf 'unexpected\n' >> "$log"; }
     rollback_remote_networks() { printf 'unexpected\n' >> "$log"; }
+    rollback_compose_socket_network() { :; }
+    report_mailpit_volume() { :; }
     (
         WPLAB_ROLLBACK_ARMED=true
         trap remote_install_exit_handler EXIT
@@ -209,5 +219,91 @@ run_case 'Persistently unhealthy service rejected' case_persistent_unhealthy_rej
 run_case 'Failed transaction rolls back containers, files, networks in order' case_rollback_order_and_exit_code
 run_case 'Successful exit does not roll back' case_success_no_rollback
 run_case 'Persistent identity follows successful verification' case_identity_only_after_verification
+
+case_recovery_accepts_acme_account() {
+    load_fn validate_acme_only_recovery
+    fixture
+    WPLAB_INSTALL_STATE=partial
+    mkdir -m 700 "$root/traefik/remote/letsencrypt"
+    printf '{"dnsresolver":{"Account":{"Email":"test@example.com"},"Certificates":null}}' > "$root/traefik/remote/letsencrypt/acme.json"
+    chmod 600 "$root/traefik/remote/letsencrypt/acme.json"
+    validate_acme_only_recovery
+}
+
+case_recovery_refuses_conflicting_file() {
+    load_fn validate_acme_only_recovery
+    fixture
+    WPLAB_INSTALL_STATE=partial
+    mkdir -m 700 "$root/traefik/remote/letsencrypt"
+    printf '{"dnsresolver":{"Account":{}}}' > "$root/traefik/remote/letsencrypt/acme.json"
+    chmod 600 "$root/traefik/remote/letsencrypt/acme.json"
+    touch "$root/traefik/remote/dashboard-users"
+    if (validate_acme_only_recovery) >/dev/null 2>&1; then return 1; fi
+}
+
+case_recovery_refuses_bad_acme_json() {
+    load_fn validate_acme_only_recovery
+    fixture
+    WPLAB_INSTALL_STATE=partial
+    mkdir -m 700 "$root/traefik/remote/letsencrypt"
+    printf 'not-json' > "$root/traefik/remote/letsencrypt/acme.json"
+    chmod 600 "$root/traefik/remote/letsencrypt/acme.json"
+    if (validate_acme_only_recovery) >/dev/null 2>&1; then return 1; fi
+}
+
+case_socket_network_id_guard() {
+    load_fn rollback_compose_socket_network
+    WPLAB_COMPOSE_SOCKET_ID=old-id
+    local removed=false
+    docker() {
+        case "$*" in
+            'network inspect wplab-remote-traefik_socket --format '*'com.docker.compose.network'*) printf 'new-id|wplab-remote-traefik|socket\n' ;;
+            'network rm '*) removed=true ;;
+            *) return 99 ;;
+        esac
+    }
+    rollback_compose_socket_network
+    [[ "$removed" == false ]]
+}
+
+case_socket_network_cleanup() {
+    load_fn rollback_compose_socket_network
+    WPLAB_COMPOSE_SOCKET_ID=network-42
+    local removed=false
+    docker() {
+        case "$*" in
+            'network inspect wplab-remote-traefik_socket --format '*'com.docker.compose.network'*) printf 'network-42|wplab-remote-traefik|socket\n' ;;
+            'network inspect wplab-remote-traefik_socket --format {{len .Containers}}') printf '0\n' ;;
+            'network rm network-42') removed=true ;;
+            *) return 99 ;;
+        esac
+    }
+    rollback_compose_socket_network
+    [[ "$removed" == true ]]
+}
+
+case_socket_network_attached_preserved() {
+    load_fn rollback_compose_socket_network
+    WPLAB_COMPOSE_SOCKET_ID=network-42
+    local removed=false
+    docker() {
+        case "$*" in
+            'network inspect wplab-remote-traefik_socket --format '*'com.docker.compose.network'*) printf 'network-42|wplab-remote-traefik|socket\n' ;;
+            'network inspect wplab-remote-traefik_socket --format {{len .Containers}}') printf '1\n' ;;
+            'network rm '*) removed=true ;;
+            *) return 99 ;;
+        esac
+    }
+    rollback_compose_socket_network
+    [[ "$removed" == false ]]
+}
+
+run_case 'Recover preserved ACME account' case_recovery_accepts_acme_account
+run_case 'Recovery rejects conflicting runtime files' case_recovery_refuses_conflicting_file
+run_case 'Recovery rejects invalid ACME data' case_recovery_refuses_bad_acme_json
+run_case 'Preserve changed Compose socket network' case_socket_network_id_guard
+run_case 'Remove owned empty Compose socket network' case_socket_network_cleanup
+run_case 'Preserve occupied Compose socket network' case_socket_network_attached_preserved
+
 printf '\nResults: %s passed, %s failed\n' "$passed" "$failed"
 [[ "$failed" == 0 ]]
