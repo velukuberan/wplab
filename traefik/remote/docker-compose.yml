@@ -1,0 +1,59 @@
+name: wplab-remote-traefik
+
+services:
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3
+    container_name: wplab-socket-proxy
+    labels:
+      - "wplab.managed=true"
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      NETWORKS: 1
+      EVENTS: 1
+      SERVICES: 0
+      TASKS: 0
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - socket
+
+  traefik:
+    image: traefik:v3.7
+    container_name: wplab-traefik
+    labels:
+      - "wplab.managed=true"
+    user: "${WPLAB_UID:?WPLAB_UID is required}:${WPLAB_GID:?WPLAB_GID is required}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      - socket-proxy
+    environment:
+      DO_AUTH_TOKEN: ${DO_AUTH_TOKEN:?DigitalOcean API token is required}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./dashboard-users:/run/wplab-auth/dashboard-users:ro
+      - ./letsencrypt:/letsencrypt
+    networks:
+      - web
+      - socket
+
+networks:
+  web:
+    external: true
+  socket:
+    internal: true

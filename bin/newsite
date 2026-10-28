@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$(realpath -e -- "${BASH_SOURCE[0]}")")" && pwd)"
 WPLAB_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMPLATE_DIR="$WPLAB_ROOT/templates/wordpress"
 WPLAB_REGISTRY_TOOL="$SCRIPT_DIR/wplab-registry"
+WPLAB_COMMON="$WPLAB_ROOT/installers/common.sh"
 
 # Sites are always generated relative to the directory from which newsite
 # was invoked. The WP Lab repository location must not determine site location.
@@ -30,6 +31,30 @@ ok() {
     echo "✅ $*"
 }
 
+# -----------------------------------------------------------------------------
+# Installed WPLab environment
+# -----------------------------------------------------------------------------
+[[ -f "$WPLAB_COMMON" && ! -L "$WPLAB_COMMON" ]] ||
+    die "WPLab shared utilities not found or unsafe: $WPLAB_COMMON"
+
+source "$WPLAB_COMMON"
+
+WPLAB_ENV_FILE="$HOME/.config/wplab/environment.env"
+
+[[ -f "$WPLAB_ENV_FILE" && ! -L "$WPLAB_ENV_FILE" ]] ||
+    die "WPLab is not configured. Run the appropriate installer first."
+
+[[ -O "$WPLAB_ENV_FILE" ]] ||
+    die "WPLab environment configuration has unexpected ownership."
+
+[[ "$(stat -c '%a' "$WPLAB_ENV_FILE")" == "600" ]] ||
+    die "WPLab environment configuration must have permissions 600."
+
+WPLAB_MODE="$(sed -n 's/^WPLAB_MODE=//p' "$WPLAB_ENV_FILE")"
+WPLAB_DOMAIN="$(sed -n 's/^WPLAB_DOMAIN=//p' "$WPLAB_ENV_FILE")"
+
+wplab_validate_environment "$WPLAB_MODE" "$WPLAB_DOMAIN"
+
 # Generate a random string containing letters and digits while avoiding
 # visually ambiguous characters.
 randstr() {
@@ -49,6 +74,9 @@ randstr() {
 # -----------------------------------------------------------------------------
 command -v jq >/dev/null 2>&1 ||
     die "jq is required but not installed."
+
+command -v python3 >/dev/null 2>&1 ||
+    die "Python 3 is required but not installed."
 
 command -v docker >/dev/null 2>&1 ||
     die "Docker is required but not installed."
@@ -85,6 +113,8 @@ fi
 # Configuration
 # -----------------------------------------------------------------------------
 SITE="$(jq -r '.name // empty' "$CONFIG")"
+SITE_HOST="${SITE}.${WPLAB_DOMAIN}"
+SITE_URL="https://${SITE_HOST}"
 WP_VERSION="$(jq -r '.wordpress // "latest"' "$CONFIG")"
 PHP_VERSION="$(jq -r '.php // "8.1"' "$CONFIG")"
 MARIADB_VERSION="$(jq -r '.mariadb // "11"' "$CONFIG")"
@@ -139,6 +169,19 @@ esac
 [[ "$SITE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] ||
     die "Invalid site name '$SITE'. Use lowercase letters, numbers, and single hyphens."
 
+# -----------------------------------------------------------------------------
+# Traefik routing
+# -----------------------------------------------------------------------------
+# Ordinary WordPress and subdirectory multisite use an exact hostname.
+TRAEFIK_HOST_RULE="Host(\`$SITE_HOST\`)"
+
+# Subdomain multisite additionally matches child hosts such as
+# shop.example.wplab.test. TLS certificate coverage is handled separately.
+if [[ "$MULTISITE_ENABLED" == "true" && "$MULTISITE_MODE" == "subdomain" ]]; then
+    TRAEFIK_REGEX_HOST="${SITE_HOST//./\\.}"
+    TRAEFIK_HOST_RULE+=" || HostRegexp(\`^.+\\.${TRAEFIK_REGEX_HOST}$\`)"
+fi
+
 SITE_DIR="$OUTPUT_ROOT/$SITE"
 
 # -----------------------------------------------------------------------------
@@ -170,6 +213,12 @@ SITE_DIR="$OUTPUT_ROOT/$SITE"
 
 [[ -f "$TEMPLATE_DIR/mu-plugins/wplab-mail.php" ]] ||
     die "Mailpit MU-plugin template not found: $TEMPLATE_DIR/mu-plugins/wplab-mail.php"
+
+# Required only for subdomain multisite installations.
+if [[ "$MULTISITE_ENABLED" == "true" && "$MULTISITE_MODE" == "subdomain" ]]; then
+    [[ -f "$TEMPLATE_DIR/mu-plugins/wplab-multisite-https.php" ]] ||
+        die "Multisite HTTPS MU-plugin template not found: $TEMPLATE_DIR/mu-plugins/wplab-multisite-https.php"
+fi
 
 # Mailpit is shared infrastructure; site creation must not create or own its network.
 docker network inspect wplab-mail >/dev/null 2>&1 ||
@@ -238,7 +287,7 @@ fi
 DB_PASSWORD="$(randstr 24)"
 DB_ROOT_PASSWORD="$(randstr 24)"
 
-ADMIN_EMAIL="admin@${SITE}.wplab.test"
+ADMIN_EMAIL="admin@${SITE_HOST}"
 SITE_TITLE="$SITE"
 
 # -----------------------------------------------------------------------------
@@ -291,6 +340,11 @@ cp "$TEMPLATE_DIR/scripts/change-admin-password.sh" \
 cp "$TEMPLATE_DIR/mu-plugins/wplab-mail.php" \
     "$SITE_DIR/mu-plugins/wplab-mail.php"
 
+if [[ "$MULTISITE_ENABLED" == "true" && "$MULTISITE_MODE" == "subdomain" ]]; then
+    cp "$TEMPLATE_DIR/mu-plugins/wplab-multisite-https.php" \
+        "$SITE_DIR/mu-plugins/wplab-multisite-https.php"
+fi
+
 chmod +x \
     "$SITE_DIR/scripts/wp-install.sh" \
     "$SITE_DIR/scripts/link-dev-content.sh" \
@@ -299,15 +353,55 @@ chmod +x \
 # -----------------------------------------------------------------------------
 # Render Docker Compose template
 # -----------------------------------------------------------------------------
-sed -i \
-    -e "s|__SITE__|$SITE|g" \
-    "$SITE_DIR/docker-compose.yml"
+python3 - \
+    "$SITE_DIR/docker-compose.yml" \
+    "$SITE" \
+    "$SITE_HOST" \
+    "$TRAEFIK_HOST_RULE" \
+    "$MULTISITE_ENABLED" \
+    "$MULTISITE_MODE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+
+replacements = {
+    "__SITE__": sys.argv[2],
+    "__SITE_HOST__": sys.argv[3],
+    "__TRAEFIK_HOST_RULE__": sys.argv[4],
+}
+
+content = path.read_text(encoding="utf-8")
+
+# Only subdomain multisite needs a second-level wildcard certificate.
+# Traefik's shared wildcard already covers ordinary and subdirectory sites.
+tls_labels = ""
+if sys.argv[5] == "true" and sys.argv[6] == "subdomain":
+    site = sys.argv[2]
+    host = sys.argv[3]
+    router = f"traefik.http.routers.{site}.tls"
+    tls_labels = "\n".join([
+        f'      - "{router}.certresolver=dnsresolver"',
+        f'      - "{router}.domains[0].main={host}"',
+        f'      - "{router}.domains[0].sans=*.{host}"',
+    ])
+
+assert content.count("__WPLAB_TLS_LABELS__") == 1, "TLS label placeholder missing"
+content = content.replace("__WPLAB_TLS_LABELS__", tls_labels)
+
+for placeholder, value in replacements.items():
+    content = content.replace(placeholder, value)
+
+path.write_text(content, encoding="utf-8")
+PY
+
 
 # -----------------------------------------------------------------------------
 # Render environment template
 # -----------------------------------------------------------------------------
 sed -i \
     -e "s|__SITE__|$SITE|g" \
+    -e "s|__SITE_HOST__|$SITE_HOST|g" \
     -e "s|__WP_VERSION__|$WP_VERSION|g" \
     -e "s|__PHP_VERSION__|$PHP_VERSION|g" \
     -e "s|__MARIADB_VERSION__|$MARIADB_VERSION|g" \
@@ -383,7 +477,7 @@ echo "  WordPress:  $WP_VERSION"
 echo "  PHP:        $PHP_VERSION"
 echo "  MariaDB:    $MARIADB_VERSION"
 echo "  Image:      wordpress:$WP_IMAGE_TAG"
-echo "  URL:        https://${SITE}.wplab.test"
+echo "  URL:        $SITE_URL"
 echo "  Multisite:  $MULTISITE_ENABLED"
 echo "  Mode:       $MULTISITE_MODE"
 echo "  Output:     $SITE_DIR"

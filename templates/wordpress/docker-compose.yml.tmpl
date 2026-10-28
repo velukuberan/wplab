@@ -80,8 +80,12 @@ services:
         WP_IMAGE: wordpress:${WP_IMAGE_TAG}
     container_name: __SITE__-wp-install
     depends_on:
-      - db
-      - wordpress
+      db:
+        condition: service_started
+      wordpress:
+        condition: service_started
+      wp-link:
+        condition: service_completed_successfully
     environment:
       SITE_URL: ${SITE_URL}
       SITE_TITLE: ${SITE_TITLE}
@@ -97,6 +101,7 @@ services:
       MULTISITE_MODE: ${MULTISITE_MODE}
     volumes:
       - wp_files:/var/www/html
+      - ./mu-plugins:/workspace/mu-plugins:ro
       - ./scripts:/workspace/scripts:ro
     networks:
       - internal
@@ -123,10 +128,12 @@ services:
       - web
     labels:
       - "traefik.enable=true"
+      - "wplab.managed=true"
       - "traefik.docker.network=web"
-      - "traefik.http.routers.__SITE__.rule=Host(`__SITE__.wplab.test`) || Host(`*.__SITE__.wplab.test`)"
+      - 'traefik.http.routers.__SITE__.rule=__TRAEFIK_HOST_RULE__'
       - "traefik.http.routers.__SITE__.entrypoints=websecure"
       - "traefik.http.routers.__SITE__.tls=true"
+__WPLAB_TLS_LABELS__
       - "traefik.http.services.__SITE__.loadbalancer.server.port=80"
 
 volumes:

@@ -1,0 +1,54 @@
+name: WPeab checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - WPL-019
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-and-remote-tests:
+    name: Bash validation and remote regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Validate Bash syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n install.sh installers/*.sh bin/newsite
+          find templates/wordpress/scripts tests -type f -name '*.sh' -print0 |
+            xargs -0 -r -n1 bash -n
+      - name: Assert remote deployment remains disabled
+        shell: bash
+        run: grep -qx 'WPLAB_REMOTE_DEPLOYMENT_ENABLED=false' installers/remote.sh
+
+      - name: Run remote installer unit tests
+        shell: bash
+        run: bash tests/test-remote-installer.sh
+
+      - name: Run remote integration tests (mocked Docker)
+        shell: bash
+        run: bash tests/test-remote-integration.sh
+
+      - name: Test WordPress TLS label generation
+        shell: bash
+        run: python3 tests/test-newsite-tls.py
+
+      - name: Test multisite HTTPS provisioning
+        shell: bash
+        run: bash tests/test-newsite-multisite-https.sh
+
+      - name: Check Git whitespace
+        shell: bash
+        run: git diff --check HEAD^ HEAD
