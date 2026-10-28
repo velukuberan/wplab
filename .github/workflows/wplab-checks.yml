@@ -49,6 +49,10 @@ jobs:
         shell: bash
         run: bash tests/test-newsite-multisite-https.sh
 
+      - name: Test remote DNS providers
+        shell: bash
+        run: bash tests/test-remote-providers.sh
+
       - name: Check Git whitespace
         shell: bash
         run: git diff --check HEAD^ HEAD

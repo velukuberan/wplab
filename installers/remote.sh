@@ -9,6 +9,39 @@ config="$root/config/remote.env"
 # Remote deployment is disabled until the complete lifecycle is verified.
 WPLAB_REMOTE_DEPLOYMENT_ENABLED=false
 
+# Load only explicitly supported remote DNS providers.
+load_dns_provider() {
+    local provider="${WPLAB_DNS_PROVIDER:-}"
+    local module
+
+    case "$provider" in
+        digitalocean)
+            module="$root/installers/providers/digitalocean.sh"
+            ;;
+        *)
+            wplab_fail "Unsupported DNS provider (currently: digitalocean)"
+            ;;
+    esac
+
+    [[ -f "$module" && ! -L "$module" ]] ||
+        wplab_fail "Missing or unsafe DNS provider module: $module"
+
+    # Provider modules are trusted code shipped with WPLab.
+    source "$module"
+}
+
+remote_provider_compose_file() {
+    case "${WPLAB_DNS_PROVIDER:-}" in
+        digitalocean)
+            printf '%s\n' \
+                "$root/traefik/remote/providers/digitalocean.compose.yml"
+            ;;
+        *)
+            wplab_fail 'Unsupported DNS provider'
+            ;;
+    esac
+}
+
 load_remote_config() {
     [[ -f "$config" && ! -L "$config" ]] ||
         wplab_fail "Missing or unsafe configuration: $config"
@@ -29,10 +62,8 @@ load_remote_config() {
     [[ -n ${WPLAB_ACME_EMAIL:-} ]] || wplab_fail 'WPLAB_ACME_EMAIL is required'
     [[ "$WPLAB_ACME_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] ||
         wplab_fail 'Invalid WPLAB_ACME_EMAIL'
-    case "${WPLAB_DNS_PROVIDER:-}" in
-        digitalocean) ;;
-        *) wplab_fail 'Unsupported DNS provider (currently: digitalocean)' ;;
-    esac
+    load_dns_provider
+    provider_validate_config
 }
 
 validate_remote_secrets() {
@@ -47,7 +78,7 @@ validate_remote_secrets() {
     (
         unset DO_AUTH_TOKEN
         source "$secrets"
-        [[ -n ${DO_AUTH_TOKEN:-} ]] || wplab_fail 'DO_AUTH_TOKEN is missing or empty'
+        provider_validate_secrets
     )
     printf '  API credentials: configured (not displayed)\n'
 }
@@ -104,7 +135,7 @@ render_template() {
 
     WPLAB_DOMAIN="$WPLAB_DOMAIN" \
     WPLAB_ACME_EMAIL="$WPLAB_ACME_EMAIL" \
-    WPLAB_DNS_PROVIDER="$WPLAB_DNS_PROVIDER" \
+    WPLAB_DNS_PROVIDER="$(provider_acme_name)" \
     python3 - "$root/traefik/remote/$template.tmpl" <<'PY'
 import os
 import sys
@@ -608,9 +639,16 @@ validate_remote_compose() {
     [[ -n "${WPLAB_UID:-}" && -n "${WPLAB_GID:-}" ]] ||
         wplab_fail 'Runtime identity has not been configured'
 
+    local provider_compose
+    provider_compose=$(remote_provider_compose_file)
+
+    [[ -f "$provider_compose" && ! -L "$provider_compose" ]] ||
+        wplab_fail "Missing or unsafe provider Compose file: $provider_compose"
+
     docker compose \
         --env-file "$secrets_file" \
         -f "$compose_file" \
+        -f "$provider_compose" \
         config --quiet ||
         wplab_fail 'Remote Docker Compose configuration is invalid'
 
@@ -881,7 +919,16 @@ start_remote_infrastructure() {
 
     # Capture created IDs on both success and failure. Never adopt a
     # pre-existing named container (validated before mutation).
-    docker compose --env-file "$secrets" -f "$tfile" up -d || result=$?
+
+    local provider_compose
+    provider_compose=$(remote_provider_compose_file)
+
+    docker compose \
+        --env-file "$secrets" \
+        -f "$tfile" \
+        -f "$provider_compose" \
+        up -d || result=$?
+
     track_compose_socket_network
     track_remote_containers <<'TRAEFIK_CONTAINERS'
 wplab-socket-proxy wplab-remote-traefik socket-proxy
