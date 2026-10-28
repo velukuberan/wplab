@@ -45,6 +45,9 @@ case_startup_order() {
     load_fn start_remote_infrastructure
     fixture
     WPLAB_DOMAIN=test.vkuberan.in
+    remote_provider_compose_file() {
+        printf '%s\n' "$root/traefik/remote/providers/digitalocean.compose.yml"
+    }
     track_remote_containers() { :; }
     check_compose_socket_absent() { :; }
     track_compose_socket_network() { :; }
@@ -59,7 +62,7 @@ case_startup_order() {
     start_remote_infrastructure
     mapfile -t calls < "$log"
     [[ "${#calls[@]}" == 2 ]] &&
-    [[ "${calls[0]}" == "compose --env-file $root/config/remote.secrets.env -f $root/traefik/remote/docker-compose.yml up -d" ]] &&
+    [[ "${calls[0]}" == "compose --env-file $root/config/remote.secrets.env -f $root/traefik/remote/docker-compose.yml -f $root/traefik/remote/providers/digitalocean.compose.yml up -d" ]] &&
     [[ "${calls[1]}" == "compose -f $root/mailpit/remote/docker-compose.yml up -d" ]]
 }
 
@@ -67,6 +70,9 @@ case_startup_failure_stops_second_stage() {
     load_fn start_remote_infrastructure
     fixture
     WPLAB_DOMAIN=test.vkuberan.in
+    remote_provider_compose_file() {
+        printf '%s\n' "$root/traefik/remote/providers/digitalocean.compose.yml"
+    }
     track_remote_containers() { :; }
     check_compose_socket_absent() { :; }
     track_compose_socket_network() { :; }

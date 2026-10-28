@@ -38,8 +38,6 @@ services:
       start_period: 10s
     depends_on:
       - socket-proxy
-    environment:
-      DO_AUTH_TOKEN: ${DO_AUTH_TOKEN:?DigitalOcean API token is required}
     ports:
       - "80:80"
       - "443:443"
