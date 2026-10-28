@@ -214,6 +214,12 @@ SITE_DIR="$OUTPUT_ROOT/$SITE"
 [[ -f "$TEMPLATE_DIR/mu-plugins/wplab-mail.php" ]] ||
     die "Mailpit MU-plugin template not found: $TEMPLATE_DIR/mu-plugins/wplab-mail.php"
 
+# Required only for subdomain multisite installations.
+if [[ "$MULTISITE_ENABLED" == "true" && "$MULTISITE_MODE" == "subdomain" ]]; then
+    [[ -f "$TEMPLATE_DIR/mu-plugins/wplab-multisite-https.php" ]] ||
+        die "Multisite HTTPS MU-plugin template not found: $TEMPLATE_DIR/mu-plugins/wplab-multisite-https.php"
+fi
+
 # Mailpit is shared infrastructure; site creation must not create or own its network.
 docker network inspect wplab-mail >/dev/null 2>&1 ||
     die "Shared Mailpit network 'wplab-mail' is missing. Start WPLab infrastructure first."
@@ -333,6 +339,11 @@ cp "$TEMPLATE_DIR/scripts/change-admin-password.sh" \
 
 cp "$TEMPLATE_DIR/mu-plugins/wplab-mail.php" \
     "$SITE_DIR/mu-plugins/wplab-mail.php"
+
+if [[ "$MULTISITE_ENABLED" == "true" && "$MULTISITE_MODE" == "subdomain" ]]; then
+    cp "$TEMPLATE_DIR/mu-plugins/wplab-multisite-https.php" \
+        "$SITE_DIR/mu-plugins/wplab-multisite-https.php"
+fi
 
 chmod +x \
     "$SITE_DIR/scripts/wp-install.sh" \

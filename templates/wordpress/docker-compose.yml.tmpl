@@ -80,8 +80,12 @@ services:
         WP_IMAGE: wordpress:${WP_IMAGE_TAG}
     container_name: __SITE__-wp-install
     depends_on:
-      - db
-      - wordpress
+      db:
+        condition: service_started
+      wordpress:
+        condition: service_started
+      wp-link:
+        condition: service_completed_successfully
     environment:
       SITE_URL: ${SITE_URL}
       SITE_TITLE: ${SITE_TITLE}
@@ -97,6 +101,7 @@ services:
       MULTISITE_MODE: ${MULTISITE_MODE}
     volumes:
       - wp_files:/var/www/html
+      - ./mu-plugins:/workspace/mu-plugins:ro
       - ./scripts:/workspace/scripts:ro
     networks:
       - internal

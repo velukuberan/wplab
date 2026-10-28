@@ -92,6 +92,5 @@ class NewsiteTLSRenderingTests(unittest.TestCase):
         self.assertNotIn('__SITE__', output)
         self.assertNotIn('__TRAEFIK_HOST_RULE__', output)
 
-
 if __name__ == "__main__":
     unittest.main(verbosity=2)

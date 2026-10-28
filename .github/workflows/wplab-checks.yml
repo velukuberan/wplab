@@ -45,6 +45,10 @@ jobs:
         shell: bash
         run: python3 tests/test-newsite-tls.py
 
+      - name: Test multisite HTTPS provisioning
+        shell: bash
+        run: bash tests/test-newsite-multisite-https.sh
+
       - name: Check Git whitespace
         shell: bash
         run: git diff --check HEAD^ HEAD
