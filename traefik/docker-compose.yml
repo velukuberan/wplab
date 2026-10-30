@@ -26,7 +26,7 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - ./traefik.yml:/etc/traefik/traefik.yml:ro
-      - ./dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./dynamic:/etc/traefik/dynamic:ro
       - ./certs:/certs:ro
     networks:
       - web
