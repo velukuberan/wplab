@@ -359,7 +359,8 @@ python3 - \
     "$SITE_HOST" \
     "$TRAEFIK_HOST_RULE" \
     "$MULTISITE_ENABLED" \
-    "$MULTISITE_MODE" <<'PY'
+    "$MULTISITE_MODE" \
+    "$WPLAB_MODE" <<'PY'
 from pathlib import Path
 import sys
 
@@ -376,7 +377,11 @@ content = path.read_text(encoding="utf-8")
 # Only subdomain multisite needs a second-level wildcard certificate.
 # Traefik's shared wildcard already covers ordinary and subdirectory sites.
 tls_labels = ""
-if sys.argv[5] == "true" and sys.argv[6] == "subdomain":
+if (
+    sys.argv[5] == "true"
+    and sys.argv[6] == "subdomain"
+    and sys.argv[7] == "remote"
+):
     site = sys.argv[2]
     host = sys.argv[3]
     router = f"traefik.http.routers.{site}.tls"
@@ -394,7 +399,6 @@ for placeholder, value in replacements.items():
 
 path.write_text(content, encoding="utf-8")
 PY
-
 
 # -----------------------------------------------------------------------------
 # Render environment template
