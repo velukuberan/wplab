@@ -118,6 +118,40 @@ class LocalTLSContractTests(unittest.TestCase):
         self.assertFalse(self.key().exists())
         self.assertFalse(self.config().exists())
 
+    def test_publication_collision_does_not_claim_foreign_certificate(self):
+        # Simulate a foreign process creating the certificate destination
+        # during publication, after the helper's existence check.
+        fake_ln = self.fakebin / "ln"
+
+        fake_ln.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "args = sys.argv[1:]\n"
+            f"destination = Path({str(self.cert())!r})\n"
+            "if Path(args[-1]) == destination:\n"
+            "    destination.write_text('FOREIGN CERTIFICATE', encoding='utf-8')\n"
+            "    sys.exit(1)\n"
+            "os.execv('/usr/bin/ln', ['ln', *args])\n",
+            encoding="utf-8",
+        )
+        fake_ln.chmod(0o755)
+
+        result = self.run_helper("provision", SITE, DOMAIN, check=False)
+
+        self.assertNotEqual(
+            result.returncode,
+            0,
+            "Provisioning must reject a collision during publication",
+        )
+        self.assertIn("Could not publish certificate", result.stderr)
+        self.assertEqual(
+            self.cert().read_text(encoding="utf-8"),
+            "FOREIGN CERTIFICATE",
+        )
+        self.assertFalse(self.key().exists())
+        self.assertFalse(self.config().exists())
+
     def test_two_sites_are_isolated(self):
         other = "ms-other"
         self.run_helper("provision", SITE, DOMAIN)
@@ -147,6 +181,54 @@ class LocalTLSContractTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
         self.assertEqual(list((self.traefik / "certs").iterdir()), [])
         self.assertEqual(list((self.traefik / "dynamic").iterdir()), [])
+
+
+    # WPL-021: ownership-aware transactional rollback contract.
+    # Provision returns "created <opaque-token>" or "existing".
+    # Rollback requires the exact token for that provisioning operation.
+    def provision_result(self, site=SITE):
+        result = self.run_helper("provision", site, DOMAIN)
+        return result.stdout.strip()
+
+    def test_new_provision_returns_ownership_token(self):
+        result = self.provision_result()
+        self.assertRegex(result, r"^created [0-9a-f]{32,128}$")
+
+    def test_existing_provision_returns_no_ownership(self):
+        first = self.provision_result()
+        second = self.provision_result()
+        self.assertTrue(first.startswith("created "))
+        self.assertEqual(second, "existing")
+
+    def test_rollback_with_matching_token_removes_owned_resources(self):
+        token = self.provision_result().split()[1]
+        self.run_helper("rollback", SITE, DOMAIN, token)
+        self.assertFalse(self.cert().exists())
+        self.assertFalse(self.key().exists())
+        self.assertFalse(self.config().exists())
+
+    def test_wrong_token_preserves_resources(self):
+        self.provision_result()
+        result = self.run_helper("rollback", SITE, DOMAIN, "0" * 64, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Usage:", result.stderr)
+        self.assertTrue(self.cert().exists())
+        self.assertTrue(self.key().exists())
+        self.assertTrue(self.config().exists())
+
+    def test_reprovision_does_not_transfer_ownership(self):
+        first_token = self.provision_result().split()[1]
+        self.assertEqual(self.provision_result(), "existing")
+        # Reusing an existing registration does not grant a fresh rollback token.
+        self.run_helper("rollback", SITE, DOMAIN, first_token)
+        self.assertFalse(self.config().exists())
+
+    def test_partial_resources_are_not_deleted_by_invalid_rollback(self):
+        self.cert().write_text("PREEXISTING CERT", encoding="utf-8")
+        result = self.run_helper("rollback", SITE, DOMAIN, "a" * 64, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Usage:", result.stderr)
+        self.assertEqual(self.cert().read_text(), "PREEXISTING CERT")
 
 
 if __name__ == "__main__":

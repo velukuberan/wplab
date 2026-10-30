@@ -10,6 +10,7 @@ WPLAB_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMPLATE_DIR="$WPLAB_ROOT/templates/wordpress"
 WPLAB_REGISTRY_TOOL="$SCRIPT_DIR/wplab-registry"
 WPLAB_COMMON="$WPLAB_ROOT/installers/common.sh"
+WPLAB_LOCAL_TLS="$SCRIPT_DIR/wplab-local-tls"
 
 # Sites are always generated relative to the directory from which newsite
 # was invoked. The WP Lab repository location must not determine site location.
@@ -239,6 +240,7 @@ docker network inspect wplab-mail >/dev/null 2>&1 ||
 # Once generation starts, any failure should remove both Docker resources
 # created for the site and the partially generated project directory.
 CLEANUP_ENABLED=false
+LOCAL_TLS_TOKEN=""
 
 cleanup_on_error() {
     local exit_code=$?
@@ -261,6 +263,11 @@ cleanup_on_error() {
 
         if [[ -d "$SITE_DIR" ]]; then
             rm -rf "$SITE_DIR"
+        fi
+
+        if [[ -n "$LOCAL_TLS_TOKEN" ]]; then
+            "$WPLAB_LOCAL_TLS" rollback "$SITE" "$WPLAB_DOMAIN" "$LOCAL_TLS_TOKEN" ||
+                echo "WARNING: Local TLS rollback failed for $SITE" >&2
         fi
     fi
 }
@@ -441,6 +448,47 @@ if
         "$SITE_DIR/scripts/link-dev-content.sh"
 then
     die "Generated site contains unresolved template placeholders."
+fi
+
+# -----------------------------------------------------------------------------
+# Local subdomain multisite TLS
+# -----------------------------------------------------------------------------
+if [[ "$WPLAB_MODE" == "local" &&
+    "$MULTISITE_ENABLED" == "true" &&
+    "$MULTISITE_MODE" == "subdomain" ]]; then
+
+    [[ -f "$WPLAB_LOCAL_TLS" && ! -L "$WPLAB_LOCAL_TLS" ]] ||
+        die "Local TLS helper is missing or unsafe: $WPLAB_LOCAL_TLS"
+
+    # The helper makes ownership decisions under its own lock.
+    # stdout is reserved for the provisioning result.
+    TLS_RESULT=$(
+        "$WPLAB_LOCAL_TLS" provision "$SITE" "$WPLAB_DOMAIN"
+    )
+
+    case "$TLS_RESULT" in
+    created\ *)
+        LOCAL_TLS_TOKEN="${TLS_RESULT#created }"
+
+        if [[ "$LOCAL_TLS_TOKEN" =~ ^[0-9a-f]{32,128}$ ]]; then
+            info "Valid local TLS ownership token received"
+        else
+            LOCAL_TLS_TOKEN=""
+            die "Local TLS helper returned an invalid ownership token"
+        fi
+
+        info "Created local TLS certificate for $SITE_HOST"
+        ;;
+
+    existing)
+        LOCAL_TLS_TOKEN=""
+        info "Using existing local TLS certificate for $SITE_HOST"
+        ;;
+
+    *)
+        die "Unexpected local TLS provisioning result"
+        ;;
+    esac
 fi
 
 # -----------------------------------------------------------------------------
