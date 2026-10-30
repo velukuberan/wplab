@@ -12,9 +12,9 @@ traefik/certs/
 /traefik/remote/traefik.yml
 /traefik/remote/dynamic.yml
 
-traefik/dynamic/.ms-subdomain-tls.lock
-traefik/dynamic/.ms-subdomain-tls.owner
-traefik/dynamic/ms-subdomain-tls.yml
+# Generated local TLS runtime files
+/traefik/dynamic/*
+!/traefik/dynamic/default-tls.yml
 
 # Remote Let's Encrypt certificates and account state
 /traefik/remote/letsencrypt/
