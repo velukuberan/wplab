@@ -28,7 +28,7 @@ def renderer_source():
     raise AssertionError("newsite TLS-rendering Python heredoc not found")
 
 
-def render(*, enabled, mode, site="msauto"):
+def render(*, enabled, mode, site="msauto", environment="remote"):
     host = f"{site}.test.vkuberan.in"
     # In Docker Compose, a literal regex $ must be escaped as $$.
     host_rule = f"Host(`{host}`)"
@@ -39,7 +39,17 @@ def render(*, enabled, mode, site="msauto"):
         output = Path(tmp) / "docker-compose.yml"
         output.write_text(TEMPLATE.read_text(encoding="utf-8"), encoding="utf-8")
         proc = subprocess.run(
-            [sys.executable, "-", str(output), site, host, host_rule, enabled, mode],
+            [
+                sys.executable,
+                "-",
+                str(output),
+                site,
+                host,
+                host_rule,
+                enabled,
+                mode,
+                environment,
+            ],
             input=renderer_source(),
             text=True,
             capture_output=True,
@@ -68,7 +78,7 @@ class NewsiteTLSRenderingTests(unittest.TestCase):
         self.assertNotIn('__WPLAB_TLS_LABELS__', output)
 
     def test_subdomain_multisite_has_nested_wildcard(self):
-        output = render(enabled="true", mode="subdomain")
+        output = render(enabled="true", mode="subdomain", environment="remote")
         expected = (
             'traefik.http.routers.msauto.tls.certresolver=dnsresolver',
             'traefik.http.routers.msauto.tls.domains[0].main=msauto.test.vkuberan.in',
@@ -79,6 +89,23 @@ class NewsiteTLSRenderingTests(unittest.TestCase):
                 self.assertEqual(output.count(label), 1)
         self.assertIn('HostRegexp(', output)
         self.assertNotIn('__WPLAB_TLS_LABELS__', output)
+
+    def test_local_subdomain_multisite_does_not_use_dnsresolver(self):
+        output = render(
+            enabled="true",
+            mode="subdomain",
+            environment="local",
+        )
+
+        self.assertIn("HostRegexp(", output)
+        self.assertNotIn(
+            "traefik.http.routers.msauto.tls.certresolver",
+            output,
+        )
+        self.assertNotIn(
+            "traefik.http.routers.msauto.tls.domains[",
+            output,
+        )
 
     def test_disabled_multisite_does_not_request_wildcard(self):
         output = render(enabled="false", mode="subdomain")
@@ -92,5 +119,7 @@ class NewsiteTLSRenderingTests(unittest.TestCase):
         self.assertNotIn('__SITE__', output)
         self.assertNotIn('__TRAEFIK_HOST_RULE__', output)
 
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
