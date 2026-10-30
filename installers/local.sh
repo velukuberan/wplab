@@ -10,12 +10,12 @@ info() { wplab_info "$@"; }
 ok() { wplab_ok "$@"; }
 
 case "${1:-}" in
-    --check|--setup-dns|--remove-dns)
-        root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-        exec bash "$root/bin/wplab-dns" "$1"
-        ;;
-    '') ;;
-    *) fail 'Usage: ./install.sh [--check|--setup-dns|--remove-dns]' ;;
+--check | --setup-dns | --remove-dns)
+    root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+    exec bash "$root/bin/wplab-dns" "$1"
+    ;;
+'') ;;
+*) fail 'Usage: ./install.sh [--check|--setup-dns|--remove-dns]' ;;
 esac
 
 [[ ${EUID} -ne 0 ]] || fail 'Run as your normal user, not root/sudo'
@@ -26,6 +26,10 @@ for cmd in docker jq python3 flock realpath; do
 done
 docker compose version >/dev/null 2>&1 || fail 'Docker Compose plugin is required'
 docker info >/dev/null 2>&1 || fail 'Docker daemon is unavailable to this user'
+
+# Configure the local WPLab environment.
+# The shared writer validates and preserves an existing matching configuration.
+wplab_write_environment local wplab.test
 
 # Traefik loads the local wildcard certificate from these paths.
 cert_dir="$root/traefik/certs"
@@ -82,6 +86,25 @@ for network in web wplab-mail; do
     fi
 done
 
+# Validate local Traefik's dynamic TLS configuration before startup.
+dynamic_dir="$root/traefik/dynamic"
+default_tls="$dynamic_dir/default-tls.yml"
+
+[[ -d "$dynamic_dir" && ! -L "$dynamic_dir" ]] ||
+    fail "Missing or unsafe Traefik dynamic configuration directory: $dynamic_dir"
+
+[[ -f "$default_tls" && ! -L "$default_tls" ]] ||
+    fail "Missing or unsafe default TLS configuration: $default_tls"
+
+grep -Fq '/certs/wplab.test.pem' "$default_tls" ||
+    fail 'Default TLS configuration does not reference the shared certificate'
+
+grep -Fq '/certs/wplab.test-key.pem' "$default_tls" ||
+    fail 'Default TLS configuration does not reference the shared private key'
+
+[[ -s "$cert" && -s "$key" ]] ||
+    fail 'Shared TLS certificate or key is missing'
+
 info 'Validating shared Compose configurations'
 docker compose -f "$root/traefik/docker-compose.yml" config --quiet
 docker compose -f "$root/mailpit/docker-compose.yml" config --quiet
@@ -103,7 +126,7 @@ printf '\nWPLab infrastructure installed.\n'
 printf 'Mailpit: https://mail.wplab.test\n'
 printf 'CLI directory: %s\n' "$bin_dir"
 case ":$PATH:" in
-    *":$bin_dir:"*) ;;
-    *) printf 'NOTE: Add %s to your PATH to run newsite/siteinfo/killsite globally.\n' "$bin_dir" ;;
+*":$bin_dir:"*) ;;
+*) printf 'NOTE: Add %s to your PATH to run newsite/siteinfo/killsite globally.\n' "$bin_dir" ;;
 esac
 printf 'NOTE: Your DNS/hosts resolver must map *.wplab.test to local Traefik.\n'
