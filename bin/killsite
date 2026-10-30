@@ -3,7 +3,10 @@
 # Usage: killsite <name>
 set -euo pipefail
 
-fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+fail() {
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 1
+}
 [[ $# -eq 1 ]] || fail 'Usage: killsite <name>'
 site=$1
 [[ "$site" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail 'Invalid site name'
@@ -38,11 +41,50 @@ trusted_makefile="$wplab_root/templates/wordpress/Makefile.tmpl"
 [[ -f "$trusted_makefile" && ! -L "$trusted_makefile" ]] || fail 'Trusted WPLab Makefile missing'
 [[ "$canonical" != "$wplab_root" && "$canonical" != "$config_dir" ]] || fail 'Unsafe WPLab directory'
 
-
 # Read only expected values, never source an untrusted .env into a shell.
 env_value() { sed -n "s/^$1=//p" "$site_dir/.env" | head -n 1; }
 [[ "$(env_value SITE_NAME)" == "$site" ]] || fail 'SITE_NAME mismatch'
 [[ "$(env_value COMPOSE_PROJECT_NAME)" == "$site" ]] || fail 'Compose project mismatch'
+
+# Determine whether this site owns local subdomain-multisite TLS.
+# Environment metadata is required; never silently skip TLS cleanup if missing.
+tls_cleanup_required=false
+environment_file="$config_dir/environment.env"
+
+[[ -f "$environment_file" && ! -L "$environment_file" ]] ||
+    fail "WPLab environment configuration missing or unsafe: $environment_file"
+
+[[ -O "$environment_file" ]] ||
+    fail 'Unexpected WPLab environment ownership'
+
+[[ "$(stat -c '%a' "$environment_file")" == "600" ]] ||
+    fail 'WPLab environment configuration must have permissions 600'
+
+env_setting() {
+    sed -n "s/^$1=//p" "$environment_file" | head -n 1
+}
+
+wplab_mode=$(env_setting WPLAB_MODE)
+wplab_domain=$(env_setting WPLAB_DOMAIN)
+
+case "$wplab_mode" in
+local | remote) ;;
+*) fail 'Invalid WPLAB_MODE' ;;
+esac
+
+if [[ "$wplab_mode" == "local" &&
+    "$(env_value MULTISITE_ENABLED)" == "true" &&
+    "$(env_value MULTISITE_MODE)" == "subdomain" ]]; then
+
+    tls_helper="$wplab_root/bin/wplab-local-tls"
+    [[ -f "$tls_helper" && ! -L "$tls_helper" && -x "$tls_helper" ]] ||
+        fail 'Local TLS helper missing or unsafe'
+
+    [[ -n "$wplab_domain" ]] ||
+        fail 'Missing WPLAB_DOMAIN'
+
+    tls_cleanup_required=true
+fi
 
 printf '\nPERMANENT DELETE: %s\nDirectory: %s\n' "$site" "$site_dir"
 printf 'Removes Docker containers, volumes, images, directory, and registry entry.\n'
@@ -51,7 +93,13 @@ IFS= read -r answer || fail 'Cancelled'
 [[ "$answer" == "$site" ]] || fail 'Cancelled'
 
 # Do not delete source files when Docker cleanup fails.
-( cd "$site_dir" && make -f "$trusted_makefile" destroy ) || fail 'Docker cleanup failed; directory and registry preserved'
+(cd "$site_dir" && make -f "$trusted_makefile" destroy) || fail 'Docker cleanup failed; directory and registry preserved'
+# Remove site-specific local TLS only after Docker cleanup succeeds.
+# Preserve the site directory and registry if TLS cleanup fails.
+if [[ "$tls_cleanup_required" == "true" ]]; then
+    "$tls_helper" cleanup "$site" "$wplab_domain" ||
+        fail 'Local TLS cleanup failed; directory and registry preserved'
+fi
 # Revalidate the directory before deleting it.
 [[ ! -L "$site_dir" && "$(realpath -e -- "$site_dir")" == "$canonical" ]] || fail 'Directory changed; refusing deletion'
 [[ "$(env_value SITE_NAME)" == "$site" ]] || fail 'Site identity changed; refusing deletion'

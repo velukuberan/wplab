@@ -22,7 +22,7 @@ providers:
     network: web
 
   file:
-    filename: /etc/traefik/dynamic.yml
+    directory: /etc/traefik/dynamic
     watch: true
 
 log:

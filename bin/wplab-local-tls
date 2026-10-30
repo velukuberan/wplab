@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# WPL-021: local-only, per-multisite mkcert certificate management.
+set -euo pipefail
+fail() {
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 1
+}
+[[ $# -ge 3 ]] || fail 'Usage: wplab-local-tls provision|cleanup|rollback <site> <domain> [token]'
+action=$1 site=$2 domain=$3
+case "$action" in
+provision | cleanup) [[ $# -eq 3 ]] || fail 'Invalid argument count' ;;
+rollback) [[ $# -eq 4 ]] || fail 'Rollback requires an ownership token' ;;
+*) fail 'Unsupported action' ;;
+esac
+[[ "$site" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail 'Invalid site name'
+[[ ${#domain} -le 253 && "$domain" =~ ^[a-z0-9]+([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]+([a-z0-9-]*[a-z0-9])?)+$ ]] || fail 'Invalid domain'
+IFS='.' read -r -a labels <<<"$domain"
+for label in "${labels[@]}"; do [[ ${#label} -le 63 ]] || fail 'Domain label too long'; done
+script=$(realpath -e -- "${BASH_SOURCE[0]}") || fail 'Cannot resolve helper path'
+root=$(dirname -- "$(dirname -- "$script")")
+cert_dir="$root/traefik/certs"
+dynamic_dir="$root/traefik/dynamic"
+host="$site.$domain"
+cert="$cert_dir/$host.pem"
+key="$cert_dir/$host-key.pem"
+config="$dynamic_dir/$site-tls.yml"
+owner="$dynamic_dir/.$site-tls.owner"
+for dir in "$root/traefik" "$cert_dir" "$dynamic_dir"; do
+    [[ -d "$dir" && ! -L "$dir" ]] || fail "Missing or unsafe directory: $dir"
+done
+for file in "$cert" "$key" "$config" "$owner"; do
+    [[ ! -L "$file" ]] || fail "Refusing symlink: $file"
+done
+command -v flock >/dev/null || fail 'flock is required'
+lock="$dynamic_dir/.$site-tls.lock"
+[[ ! -L "$lock" ]] || fail 'Unsafe TLS lock'
+exec 9>"$lock"
+flock -x 9
+# Recheck under lock before operating on filesystem objects.
+for file in "$cert" "$key" "$config" "$owner"; do
+    [[ ! -L "$file" ]] || fail "Refusing symlink: $file"
+done
+expected=$(printf 'tls:\n  certificates:\n    - certFile: /certs/%s.pem\n      keyFile: /certs/%s-key.pem\n' "$host" "$host")
+validate_present() {
+    [[ -f "$cert" && -s "$cert" && -f "$key" && -s "$key" && -f "$config" && -s "$config" ]] || fail 'Partial TLS resources; refusing operation'
+    [[ "$(cat -- "$config")" == "$expected" ]] || fail 'TLS registration differs; refusing operation'
+    if [[ -e "$owner" ]]; then
+        [[ -f "$owner" && -s "$owner" ]] || fail 'Unsafe ownership record'
+        [[ "$(cat -- "$owner")" =~ ^[0-9a-f]{64}$ ]] || fail 'Malformed ownership record'
+    fi
+}
+case "$action" in
+provision)
+    if [[ -e "$cert" || -e "$key" || -e "$config" || -e "$owner" ]]; then
+        validate_present
+        printf 'existing\n'
+        exit 0
+    fi
+    command -v mkcert >/dev/null || fail 'mkcert is required'
+    command -v openssl >/dev/null || fail 'openssl is required for ownership token generation'
+    umask 077
+    cert_tmp=$(mktemp "$cert_dir/.$site-cert.XXXXXXXX") || fail 'Cannot stage certificate'
+    key_tmp=$(mktemp "$cert_dir/.$site-key.XXXXXXXX") || fail 'Cannot stage key'
+    config_tmp=$(mktemp "$dynamic_dir/.$site-tls.XXXXXXXX") || fail 'Cannot stage registration'
+    owner_tmp=$(mktemp "$dynamic_dir/.$site-owner.XXXXXXXX") || fail 'Cannot stage ownership record'
+    cleanup_tmp() { rm -f -- "$cert_tmp" "$key_tmp" "$config_tmp" "$owner_tmp"; }
+    trap cleanup_tmp EXIT
+    mkcert -cert-file "$cert_tmp" -key-file "$key_tmp" "$host" "*.$host" || fail 'mkcert failed'
+    [[ -s "$cert_tmp" && -s "$key_tmp" ]] || fail 'mkcert wrote empty certificate/key'
+    chmod 644 "$cert_tmp"
+    chmod 600 "$key_tmp"
+    printf '%s\n' "$expected" >"$config_tmp"
+    chmod 644 "$config_tmp"
+    token=$(openssl rand -hex 32) || fail 'Could not generate ownership token'
+    [[ "$token" =~ ^[0-9a-f]{64}$ ]] || fail 'Invalid generated ownership token'
+    printf '%s\n' "$token" >"$owner_tmp"
+    chmod 600 "$owner_tmp"
+    [[ ! -e "$cert" && ! -e "$key" && ! -e "$config" && ! -e "$owner" ]] || fail 'Resources appeared during provisioning'
+
+    # Publish without overwriting existing destination paths.
+    # Hard links fail if a destination already exists.
+    #
+    # All staged files are created within their destination directory,
+    # so link() operates on the same filesystem.
+    #
+    # Register the certificate with Traefik only after all resources
+    # have been published successfully.
+
+    published_cert=false
+    published_key=false
+    published_owner=false
+
+    rollback_publication() {
+        # Remove only files successfully published by this operation.
+        if $published_owner; then
+            rm -f -- "$owner"
+        fi
+
+        if $published_key; then
+            rm -f -- "$key"
+        fi
+
+        if $published_cert; then
+            rm -f -- "$cert"
+        fi
+    }
+
+    if ! ln -- "$cert_tmp" "$cert"; then
+        fail 'Could not publish certificate: destination already exists'
+    fi
+    published_cert=true
+    rm -f -- "$cert_tmp"
+
+    if ! ln -- "$key_tmp" "$key"; then
+        rollback_publication
+        fail 'Could not publish key: destination already exists'
+    fi
+    published_key=true
+    rm -f -- "$key_tmp"
+
+    if ! ln -- "$owner_tmp" "$owner"; then
+        rollback_publication
+        fail 'Could not publish ownership record'
+    fi
+    published_owner=true
+    rm -f -- "$owner_tmp"
+
+    if ! ln -- "$config_tmp" "$config"; then
+        rollback_publication
+        fail 'Could not publish TLS registration'
+    fi
+    rm -f -- "$config_tmp"
+
+    trap - EXIT
+    printf 'created %s\n' "$token"
+    ;;
+rollback)
+    token=$4
+    [[ "$token" =~ ^[0-9a-f]{64}$ ]] || fail 'Invalid rollback token'
+    [[ -f "$owner" && ! -L "$owner" ]] || fail 'Ownership record missing; refusing rollback'
+    [[ "$(cat -- "$owner")" == "$token" ]] || fail 'Rollback token mismatch'
+    validate_present
+    rm -f -- "$config" "$cert" "$key" "$owner" || fail 'Rollback failed'
+    printf 'rolled-back\n'
+    ;;
+cleanup)
+    if [[ ! -e "$cert" && ! -e "$key" && ! -e "$config" && ! -e "$owner" ]]; then
+        printf 'absent\n'
+        exit 0
+    fi
+    validate_present
+    rm -f -- "$config" "$cert" "$key" "$owner" || fail 'Cleanup failed'
+    printf 'cleaned\n'
+    ;;
+esac
